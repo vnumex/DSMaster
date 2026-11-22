@@ -165,9 +165,11 @@ impl GyroAimMode {
 #[serde(default)]
 pub struct ControllerProfile {
     pub emulation: EmulationMode,
+    pub override_lightbar: bool,
     pub lightbar_rgb: [u8; 3],
     pub player_leds: u8,
     pub enable_rumble: bool,
+    pub override_triggers: bool,
     pub left_trigger_preset: TriggerPreset,
     pub right_trigger_preset: TriggerPreset,
     pub left_stick: StickTuning,
@@ -184,9 +186,11 @@ impl Default for ControllerProfile {
     fn default() -> Self {
         Self {
             emulation: EmulationMode::Xbox360,
+            override_lightbar: false,
             lightbar_rgb: [0, 96, 255],
             player_leds: 0x04,
             enable_rumble: true,
+            override_triggers: false,
             left_trigger_preset: TriggerPreset::Off,
             right_trigger_preset: TriggerPreset::Off,
             left_stick: StickTuning::default(),

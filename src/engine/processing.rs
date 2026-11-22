@@ -5,6 +5,10 @@ use crate::protocol::{BatteryStatus, DualSenseButtons, RawInputState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessedInput {
+    pub raw_left_x: u8,
+    pub raw_left_y: u8,
+    pub raw_right_x: u8,
+    pub raw_right_y: u8,
     pub left_x: u8,
     pub left_y: u8,
     pub right_x: u8,
@@ -121,6 +125,10 @@ pub fn process_input(
     buttons.set(DualSenseButtons::R2_DIGITAL, r2_analog >= 32);
 
     ProcessedInput {
+        raw_left_x: raw.left_x,
+        raw_left_y: raw.left_y,
+        raw_right_x: raw.right_x,
+        raw_right_y: raw.right_y,
         left_x: left[0],
         left_y: left[1],
         right_x: right[0],

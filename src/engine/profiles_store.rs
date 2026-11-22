@@ -165,4 +165,11 @@ auto_switch_profiles = true
         assert!(parsed.work_in_background);
         assert!(!parsed.start_minimized);
     }
+
+    #[test]
+    fn default_profile_leaves_hardware_untouched() {
+        let prof = ControllerProfile::default();
+        assert!(!prof.override_triggers);
+        assert!(!prof.override_lightbar);
+    }
 }

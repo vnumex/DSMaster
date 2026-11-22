@@ -200,6 +200,10 @@ mod tests {
 
     fn sample_processed() -> ProcessedInput {
         ProcessedInput {
+            raw_left_x: 255,
+            raw_left_y: 0,
+            raw_right_x: 128,
+            raw_right_y: 128,
             left_x: 255,
             left_y: 0,
             right_x: 128,

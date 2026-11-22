@@ -182,4 +182,30 @@ mod tests {
         assert_eq!(&bt_547[..78], &bt[..]);
         assert!(bt_547[78..].iter().all(|&b| b == 0));
     }
+
+    #[test]
+    fn rumble_only_leaves_lightbar_and_triggers_untouched() {
+        let state = OutputState {
+            update_rumble: true,
+            motor_left: 150,
+            motor_right: 80,
+            ..Default::default()
+        };
+
+        let mut usb = [0u8; 48];
+        encode_output_report(&state, Transport::Usb, 0, &mut usb).unwrap();
+        assert_eq!(usb[1] & 0x0C, 0);
+        assert_eq!(usb[2] & 0x14, 0);
+        assert_eq!(usb[39] & 0x02, 0);
+        assert_eq!(usb[3], 80);
+        assert_eq!(usb[4], 150);
+
+        let mut bt = [0u8; 78];
+        encode_output_report(&state, Transport::Bluetooth, 1, &mut bt).unwrap();
+        assert_eq!(bt[3] & 0x0C, 0);
+        assert_eq!(bt[4] & 0x14, 0);
+        assert_eq!(bt[41] & 0x02, 0);
+        assert_eq!(bt[5], 80);
+        assert_eq!(bt[6], 150);
+    }
 }

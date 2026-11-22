@@ -1,11 +1,16 @@
 pub mod theme;
 mod widgets;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use gpui::{Context, Div, FontWeight, SharedString, Task, Window, div, prelude::*, px};
+use gpui::{
+    Bounds, Context, Div, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    SharedString, Task, Window, div, prelude::*, px,
+};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow};
 
@@ -13,8 +18,8 @@ use self::theme::{
     ACCENT, BG, BORDER, DANGER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
 };
 use self::widgets::{
-    button_pill, coming_soon_pill, driver_badge, meter_row, pill_button, section_card, setting_row,
-    stick_box,
+    button_pill, coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button,
+    section_card, setting_row, slider_bar, stick_box,
 };
 use crate::emu::EmulationMode;
 use crate::engine::profile::{
@@ -63,17 +68,30 @@ const PLAYER_LED_OPTIONS: [(&str, u8); 5] = [
     ("4", 0x1B),
 ];
 
-const DEADZONE_STEPS: [(&str, f32); 6] = [
-    ("0%", 0.0),
-    ("3%", 0.03),
-    ("5%", 0.05),
-    ("8%", 0.08),
-    ("12%", 0.12),
-    ("18%", 0.18),
-];
+const MAX_STICK_DZ: f32 = 0.35;
+const MAX_TRIGGER_DZ_PCT: f32 = 35.0;
 
-const ANTI_DEADZONE_STEPS: [(&str, f32); 4] =
-    [("0%", 0.0), ("5%", 0.05), ("10%", 0.10), ("15%", 0.15)];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveSlider {
+    LeftInner,
+    LeftAnti,
+    RightInner,
+    RightAnti,
+    Trigger,
+}
+
+impl ActiveSlider {
+    #[inline]
+    fn slot(self) -> usize {
+        match self {
+            Self::LeftInner => 0,
+            Self::LeftAnti => 1,
+            Self::RightInner => 2,
+            Self::RightAnti => 3,
+            Self::Trigger => 4,
+        }
+    }
+}
 
 const HAIR_TRIGGER_STEPS: [(&str, u8); 4] =
     [("Full", 255), ("75%", 190), ("50%", 128), ("25%", 64)];
@@ -97,6 +115,8 @@ pub struct DsMasterView {
     run_at_startup: bool,
     tray_tx: crossbeam_channel::Sender<TrayAction>,
     tray: Option<SystemTray>,
+    active_slider: Option<(ActiveSlider, f32, f32)>,
+    slider_bounds: Rc<RefCell<[Bounds<Pixels>; 5]>>,
     _watch_task: Task<()>,
     _tray_task: Task<()>,
 }
@@ -135,6 +155,8 @@ impl DsMasterView {
             run_at_startup,
             tray_tx,
             tray: None,
+            active_slider: None,
+            slider_bounds: Rc::new(RefCell::new([Bounds::default(); 5])),
             _watch_task: Task::ready(()),
             _tray_task: Task::ready(()),
         };
@@ -345,6 +367,89 @@ impl DsMasterView {
         self.snapshots.get(self.selected_idx)
     }
 
+    fn start_slider_drag(&mut self, slider: ActiveSlider, mouse_x: Pixels, cx: &mut Context<Self>) {
+        let bounds = self.slider_bounds.borrow()[slider.slot()];
+        let origin_x = f32::from(bounds.origin.x);
+        let width = f32::from(bounds.size.width);
+        if width > 1.0 {
+            self.active_slider = Some((slider, origin_x, width));
+            let t = ((f32::from(mouse_x) - origin_x) / width).clamp(0.0, 1.0);
+            self.apply_slider_live(slider, t, cx);
+        }
+    }
+
+    fn apply_slider_live(&mut self, slider: ActiveSlider, t: f32, cx: &mut Context<Self>) {
+        let t = t.clamp(0.0, 1.0);
+        let stick_val = ((t * MAX_STICK_DZ * 100.0).round() / 100.0).clamp(0.0, MAX_STICK_DZ);
+        let trig_pct = (t * MAX_TRIGGER_DZ_PCT)
+            .round()
+            .clamp(0.0, MAX_TRIGGER_DZ_PCT);
+        let trig_u8 = (trig_pct * 255.0 / 100.0).round() as u8;
+
+        let s = self.config.active_settings_mut();
+        match slider {
+            ActiveSlider::LeftInner => s.left_stick.deadzone = stick_val,
+            ActiveSlider::LeftAnti => s.left_stick.anti_deadzone = stick_val,
+            ActiveSlider::RightInner => s.right_stick.deadzone = stick_val,
+            ActiveSlider::RightAnti => s.right_stick.anti_deadzone = stick_val,
+            ActiveSlider::Trigger => s.triggers.deadzone = trig_u8,
+        }
+
+        if let Some(engine) = &self.engine {
+            engine.apply_config(&self.config);
+        }
+        cx.notify();
+    }
+
+    fn finish_slider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.active_slider.take().is_some() {
+            self.commit_config(cx);
+        }
+    }
+
+    fn render_slider_row(
+        &self,
+        title: &'static str,
+        value_label: String,
+        ratio: f32,
+        fill_color: u32,
+        slider: ActiveSlider,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_xs().text_color(color(TEXT_MUTED)).child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color(TEXT))
+                            .child(value_label),
+                    ),
+            )
+            .child(
+                slider_bar(
+                    ratio,
+                    fill_color,
+                    slider.slot(),
+                    Rc::clone(&self.slider_bounds),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        this.start_slider_drag(slider, ev.position.x, cx);
+                    }),
+                ),
+            )
+    }
+
     fn render_overview(&self, cx: &mut Context<Self>) -> Div {
         let profile = self.config.active_settings();
         let snap = self.selected_snapshot().copied();
@@ -520,15 +625,46 @@ impl DsMasterView {
                 .child(coming_soon_pill("Virtual DualSense (Coming Soon)")),
         );
 
+        let trig_mode_row = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(
+                div()
+                    .w(px(36.0))
+                    .text_xs()
+                    .text_color(color(TEXT_MUTED))
+                    .child("Mode"),
+            )
+            .child(
+                pill_button(
+                    "trig-untouched",
+                    "Default (Untouched)",
+                    !profile.override_triggers,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.config.active_settings_mut().override_triggers = false;
+                    this.commit_config(cx);
+                })),
+            )
+            .child(
+                pill_button("trig-custom", "Custom", profile.override_triggers).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.config.active_settings_mut().override_triggers = true;
+                        this.commit_config(cx);
+                    }),
+                ),
+            );
+
         let mut l2_row = div().flex().items_center().gap_1p5().child(
             div()
-                .w(px(28.0))
+                .w(px(36.0))
                 .text_xs()
                 .text_color(color(TEXT_MUTED))
                 .child("L2"),
         );
         for preset in TriggerPreset::ALL {
-            let active = profile.left_trigger_preset == preset;
+            let active = profile.override_triggers && profile.left_trigger_preset == preset;
             l2_row = l2_row.child(
                 pill_button(
                     SharedString::from(format!("l2-{}", preset.label())),
@@ -536,7 +672,9 @@ impl DsMasterView {
                     active,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.config.active_settings_mut().left_trigger_preset = preset;
+                    let s = this.config.active_settings_mut();
+                    s.override_triggers = true;
+                    s.left_trigger_preset = preset;
                     this.commit_config(cx);
                 })),
             );
@@ -544,13 +682,13 @@ impl DsMasterView {
 
         let mut r2_row = div().flex().items_center().gap_1p5().child(
             div()
-                .w(px(28.0))
+                .w(px(36.0))
                 .text_xs()
                 .text_color(color(TEXT_MUTED))
                 .child("R2"),
         );
         for preset in TriggerPreset::ALL {
-            let active = profile.right_trigger_preset == preset;
+            let active = profile.override_triggers && profile.right_trigger_preset == preset;
             r2_row = r2_row.child(
                 pill_button(
                     SharedString::from(format!("r2-{}", preset.label())),
@@ -558,19 +696,32 @@ impl DsMasterView {
                     active,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.config.active_settings_mut().right_trigger_preset = preset;
+                    let s = this.config.active_settings_mut();
+                    s.override_triggers = true;
+                    s.right_trigger_preset = preset;
                     this.commit_config(cx);
                 })),
             );
         }
 
         let triggers_card = section_card("ADAPTIVE TRIGGERS")
+            .child(trig_mode_row)
             .child(l2_row)
             .child(r2_row);
 
-        let mut swatch_row = div().flex().flex_wrap().gap_1p5();
+        let mut swatch_row = div().flex().flex_wrap().gap_1p5().child(
+            pill_button(
+                "rgb-untouched",
+                "Default (Untouched)",
+                !profile.override_lightbar,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.config.active_settings_mut().override_lightbar = false;
+                this.commit_config(cx);
+            })),
+        );
         for (name, rgb_val) in RGB_SWATCHES {
-            let active = profile.lightbar_rgb == rgb_val;
+            let active = profile.override_lightbar && profile.lightbar_rgb == rgb_val;
             let hex =
                 ((rgb_val[0] as u32) << 16) | ((rgb_val[1] as u32) << 8) | (rgb_val[2] as u32);
             swatch_row = swatch_row.child(
@@ -588,7 +739,9 @@ impl DsMasterView {
                     .cursor_pointer()
                     .hover(|s| s.bg(color(SURFACE_HOVER)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.config.active_settings_mut().lightbar_rgb = rgb_val;
+                        let s = this.config.active_settings_mut();
+                        s.override_lightbar = true;
+                        s.lightbar_rgb = rgb_val;
                         this.commit_config(cx);
                     }))
                     .child(
@@ -611,11 +764,13 @@ impl DsMasterView {
                 .child("Player LEDs"),
         );
         for (label, mask) in PLAYER_LED_OPTIONS {
-            let active = profile.player_leds == mask;
+            let active = profile.override_lightbar && profile.player_leds == mask;
             player_row = player_row.child(
                 pill_button(SharedString::from(format!("pled-{label}")), label, active).on_click(
                     cx.listener(move |this, _, _, cx| {
-                        this.config.active_settings_mut().player_leds = mask;
+                        let s = this.config.active_settings_mut();
+                        s.override_lightbar = true;
+                        s.player_leds = mask;
                         this.commit_config(cx);
                     }),
                 ),
@@ -768,78 +923,51 @@ impl DsMasterView {
             )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_stick_card(
         &self,
         title: &'static str,
         prefix: &'static str,
         tuning: StickTuning,
+        raw: [u8; 2],
+        out: [u8; 2],
+        connected: bool,
         is_left: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut dz_row = div().flex().items_center().gap_1p5().child(
-            div()
-                .w(px(86.0))
-                .text_xs()
-                .text_color(color(TEXT_MUTED))
-                .child("Deadzone"),
-        );
-        for (label, val) in DEADZONE_STEPS {
-            let active = (tuning.deadzone - val).abs() < 0.005;
-            dz_row = dz_row.child(
-                pill_button(
-                    SharedString::from(format!("{prefix}-dz-{label}")),
-                    label,
-                    active,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let s = this.config.active_settings_mut();
-                    if is_left {
-                        s.left_stick.deadzone = val;
-                    } else {
-                        s.right_stick.deadzone = val;
-                    }
-                    this.commit_config(cx);
-                })),
-            );
-        }
+        let dz_slider = if is_left {
+            ActiveSlider::LeftInner
+        } else {
+            ActiveSlider::RightInner
+        };
+        let adz_slider = if is_left {
+            ActiveSlider::LeftAnti
+        } else {
+            ActiveSlider::RightAnti
+        };
 
-        let mut adz_row = div().flex().items_center().gap_1p5().child(
-            div()
-                .w(px(86.0))
-                .text_xs()
-                .text_color(color(TEXT_MUTED))
-                .child("Anti-Deadzone"),
+        let dz_row = self.render_slider_row(
+            "Deadzone",
+            format!("{}%", (tuning.deadzone * 100.0).round() as u32),
+            tuning.deadzone / MAX_STICK_DZ,
+            ACCENT,
+            dz_slider,
+            cx,
         );
-        for (label, val) in ANTI_DEADZONE_STEPS {
-            let active = (tuning.anti_deadzone - val).abs() < 0.005;
-            adz_row = adz_row.child(
-                pill_button(
-                    SharedString::from(format!("{prefix}-adz-{label}")),
-                    label,
-                    active,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let s = this.config.active_settings_mut();
-                    if is_left {
-                        s.left_stick.anti_deadzone = val;
-                    } else {
-                        s.right_stick.anti_deadzone = val;
-                    }
-                    this.commit_config(cx);
-                })),
-            );
-        }
 
-        let mut curve_row = div().flex().items_center().gap_1p5().child(
-            div()
-                .w(px(86.0))
-                .text_xs()
-                .text_color(color(TEXT_MUTED))
-                .child("Curve"),
+        let adz_row = self.render_slider_row(
+            "Anti-Deadzone",
+            format!("{}%", (tuning.anti_deadzone * 100.0).round() as u32),
+            tuning.anti_deadzone / MAX_STICK_DZ,
+            WARN,
+            adz_slider,
+            cx,
         );
+
+        let mut curve_pills = div().flex().flex_wrap().items_center().gap_1();
         for curve in ResponseCurve::ALL {
             let active = tuning.curve == curve;
-            curve_row = curve_row.child(
+            curve_pills = curve_pills.child(
                 pill_button(
                     SharedString::from(format!("{prefix}-cv-{}", curve.label())),
                     curve.label(),
@@ -857,20 +985,67 @@ impl DsMasterView {
             );
         }
 
-        section_card(title)
-            .flex_1()
-            .child(dz_row)
-            .child(adz_row)
-            .child(curve_row)
+        let curve_row = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(color(TEXT_MUTED)).child("Curve"))
+            .child(curve_pills);
+
+        section_card(title).flex_1().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(deadzone_showcase(raw, out, tuning, connected))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .gap_2()
+                        .child(dz_row)
+                        .child(adz_row)
+                        .child(curve_row),
+                ),
+        )
     }
 
     fn render_tuning(&self, cx: &mut Context<Self>) -> Div {
         let profile = self.config.active_settings();
+        let snap = self.selected_snapshot().copied().unwrap_or_default();
+        let connected = !self.handles.is_empty();
 
-        let left_card =
-            self.render_stick_card("LEFT STICK TUNING", "ls", profile.left_stick, true, cx);
-        let right_card =
-            self.render_stick_card("RIGHT STICK TUNING", "rs", profile.right_stick, false, cx);
+        let left_card = self.render_stick_card(
+            "LEFT STICK TUNING",
+            "ls",
+            profile.left_stick,
+            snap.raw_left_stick,
+            snap.left_stick,
+            connected,
+            true,
+            cx,
+        );
+        let right_card = self.render_stick_card(
+            "RIGHT STICK TUNING",
+            "rs",
+            profile.right_stick,
+            snap.raw_right_stick,
+            snap.right_stick,
+            connected,
+            false,
+            cx,
+        );
+
+        let trig_dz_pct = (profile.triggers.deadzone as f32 * 100.0 / 255.0).round() as u32;
+        let trig_dz_row = self.render_slider_row(
+            "Trigger Deadzone",
+            format!("{trig_dz_pct}%"),
+            trig_dz_pct as f32 / MAX_TRIGGER_DZ_PCT,
+            ACCENT,
+            ActiveSlider::Trigger,
+            cx,
+        );
 
         let mut hair_row = div().flex().items_center().gap_1p5().child(
             div()
@@ -914,6 +1089,7 @@ impl DsMasterView {
         }
 
         let trig_remap_card = section_card("TRIGGERS & BUTTON REMAPPING")
+            .child(trig_dz_row)
             .child(hair_row)
             .child(remap_row);
 
@@ -1189,6 +1365,7 @@ impl DsMasterView {
             .map(Engine::is_cloak_enabled)
             .unwrap_or(self.config.cloak_physical);
         let auto_switch_on = self.config.auto_switch_profiles;
+        let profile = self.config.active_settings();
 
         let bg_card =
             section_card("BACKGROUND & TRAY")
@@ -1344,6 +1521,48 @@ impl DsMasterView {
                         ),
                 ))
                 .child(setting_row(
+                    "Adaptive Triggers",
+                    "Leave trigger actuators untouched or apply profile presets",
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            pill_button("set-trig-def", "Default", !profile.override_triggers)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.config.active_settings_mut().override_triggers = false;
+                                    this.commit_config(cx);
+                                })),
+                        )
+                        .child(
+                            pill_button("set-trig-cust", "Custom", profile.override_triggers)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.config.active_settings_mut().override_triggers = true;
+                                    this.commit_config(cx);
+                                })),
+                        ),
+                ))
+                .child(setting_row(
+                    "Lightbar & LEDs",
+                    "Leave lightbar and player LEDs untouched or override them",
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            pill_button("set-lb-def", "Default", !profile.override_lightbar)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.config.active_settings_mut().override_lightbar = false;
+                                    this.commit_config(cx);
+                                })),
+                        )
+                        .child(
+                            pill_button("set-lb-cust", "Custom", profile.override_lightbar)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.config.active_settings_mut().override_lightbar = true;
+                                    this.commit_config(cx);
+                                })),
+                        ),
+                ))
+                .child(setting_row(
                     "Active Profile",
                     "Manage profiles and app bindings in the Profiles tab",
                     div()
@@ -1471,7 +1690,10 @@ impl Render for DsMasterView {
         self.read_snapshots();
 
         let is_hidden = self.window_ctl.window_hidden.load(Ordering::Acquire);
-        if !is_hidden && self.tab == ActiveTab::Overview && !self.handles.is_empty() {
+        if !is_hidden
+            && !self.handles.is_empty()
+            && matches!(self.tab, ActiveTab::Overview | ActiveTab::Tuning)
+        {
             window.request_animation_frame();
         }
 
@@ -1607,6 +1829,28 @@ impl Render for DsMasterView {
             .size_full()
             .bg(color(BG))
             .text_color(color(TEXT))
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if let Some((slider, origin_x, width)) = this.active_slider {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        let t = ((f32::from(ev.position.x) - origin_x) / width).clamp(0.0, 1.0);
+                        this.apply_slider_live(slider, t, cx);
+                    } else {
+                        this.finish_slider_drag(cx);
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_slider_drag(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_slider_drag(cx);
+                }),
+            )
             .child(header)
             .child(nav_bar)
             .child(div().flex().flex_col().flex_1().p_4().child(body))

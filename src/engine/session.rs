@@ -145,6 +145,8 @@ fn session_loop(
 
     let mut mouse = MouseInjector::default();
     let mut bt_seq: u8 = 0;
+    let mut last_override_lightbar = initial_prof.override_lightbar;
+    let mut last_override_triggers = initial_prof.override_triggers;
     let mut last_rgb = initial_prof.lightbar_rgb;
     let mut ds4_rgb: Option<[u8; 3]> = None;
     let mut last_leds = initial_prof.player_leds;
@@ -152,23 +154,29 @@ fn session_loop(
     let mut last_right_trigger = initial_prof.right_trigger_preset.effect();
     let mut rumble_large: u8 = 0;
     let mut rumble_small: u8 = 0;
+    let mut triggers_touched = initial_prof.override_triggers;
+    let mut dirty_rumble = false;
+    let mut dirty_lightbar = false;
+    let mut dirty_triggers = false;
+    let mut release_triggers = false;
 
-    flush_output(
-        &mut device,
-        &OutputState {
-            update_lightbar: true,
-            lightbar_rgb: last_rgb,
-            update_player_leds: true,
-            player_leds: last_leds,
-            update_left_trigger: true,
-            left_trigger: last_left_trigger,
-            update_right_trigger: true,
-            right_trigger: last_right_trigger,
-            ..Default::default()
-        },
-        &mut bt_seq,
-    );
-    let mut output_dirty = false;
+    if initial_prof.override_lightbar || initial_prof.override_triggers {
+        flush_output(
+            &mut device,
+            &OutputState {
+                update_lightbar: initial_prof.override_lightbar,
+                lightbar_rgb: last_rgb,
+                update_player_leds: initial_prof.override_lightbar,
+                player_leds: last_leds,
+                update_left_trigger: initial_prof.override_triggers,
+                left_trigger: last_left_trigger,
+                update_right_trigger: initial_prof.override_triggers,
+                right_trigger: last_right_trigger,
+                ..Default::default()
+            },
+            &mut bt_seq,
+        );
+    }
     let mut last_output_write = Instant::now();
 
     let mut rate_window_start = Instant::now();
@@ -222,61 +230,120 @@ fn session_loop(
                 if let Some(vc) = target.as_deref_mut() {
                     let _ = vc.submit(&proc_in);
                     if let Some(fb) = vc.poll_feedback() {
-                        if prof.enable_rumble
-                            && (fb.large_motor != rumble_large || fb.small_motor != rumble_small)
-                        {
-                            rumble_large = fb.large_motor;
-                            rumble_small = fb.small_motor;
-                            output_dirty = true;
+                        if prof.enable_rumble {
+                            if fb.large_motor != rumble_large || fb.small_motor != rumble_small {
+                                rumble_large = fb.large_motor;
+                                rumble_small = fb.small_motor;
+                                dirty_rumble = true;
+                            }
+                        } else if rumble_large != 0 || rumble_small != 0 {
+                            rumble_large = 0;
+                            rumble_small = 0;
+                            dirty_rumble = true;
                         }
-                        if let Some(rgb) = fb.lightbar_rgb {
-                            if ds4_rgb != Some(rgb) {
-                                ds4_rgb = Some(rgb);
-                                output_dirty = true;
+                        if prof.override_lightbar {
+                            if let Some(rgb) = fb.lightbar_rgb {
+                                if ds4_rgb != Some(rgb) {
+                                    ds4_rgb = Some(rgb);
+                                    dirty_lightbar = true;
+                                }
                             }
                         }
                     }
                 }
 
-                let left_eff = prof.left_trigger_preset.effect();
-                let right_eff = prof.right_trigger_preset.effect();
-                if prof.lightbar_rgb != last_rgb
-                    || prof.player_leds != last_leds
-                    || left_eff != last_left_trigger
-                    || right_eff != last_right_trigger
+                if !prof.enable_rumble && (rumble_large != 0 || rumble_small != 0) {
+                    rumble_large = 0;
+                    rumble_small = 0;
+                    dirty_rumble = true;
+                }
+
+                if prof.override_lightbar != last_override_lightbar {
+                    last_override_lightbar = prof.override_lightbar;
+                    if prof.override_lightbar {
+                        last_rgb = prof.lightbar_rgb;
+                        last_leds = prof.player_leds;
+                        dirty_lightbar = true;
+                    } else {
+                        ds4_rgb = None;
+                        dirty_lightbar = false;
+                    }
+                } else if prof.override_lightbar
+                    && (prof.lightbar_rgb != last_rgb || prof.player_leds != last_leds)
                 {
                     last_rgb = prof.lightbar_rgb;
                     last_leds = prof.player_leds;
-                    last_left_trigger = left_eff;
-                    last_right_trigger = right_eff;
-                    output_dirty = true;
+                    dirty_lightbar = true;
                 }
 
-                if output_dirty {
+                let left_eff = prof.left_trigger_preset.effect();
+                let right_eff = prof.right_trigger_preset.effect();
+                if prof.override_triggers != last_override_triggers {
+                    last_override_triggers = prof.override_triggers;
+                    if prof.override_triggers {
+                        last_left_trigger = left_eff;
+                        last_right_trigger = right_eff;
+                        dirty_triggers = true;
+                        release_triggers = false;
+                        triggers_touched = true;
+                    } else {
+                        dirty_triggers = false;
+                        if triggers_touched {
+                            release_triggers = true;
+                        }
+                    }
+                } else if prof.override_triggers
+                    && (left_eff != last_left_trigger || right_eff != last_right_trigger)
+                {
+                    last_left_trigger = left_eff;
+                    last_right_trigger = right_eff;
+                    dirty_triggers = true;
+                    triggers_touched = true;
+                }
+
+                if dirty_rumble || dirty_lightbar || dirty_triggers || release_triggers {
                     let can_write = info.transport == Transport::Usb
                         || last_output_write.elapsed() >= bt_min_interval
-                        || (rumble_large == 0 && rumble_small == 0);
+                        || (dirty_rumble && rumble_large == 0 && rumble_small == 0)
+                        || release_triggers;
                     if can_write {
                         let effective_rgb = ds4_rgb.unwrap_or(last_rgb);
+                        let update_lb = dirty_lightbar && prof.override_lightbar;
+                        let update_trig =
+                            (dirty_triggers && prof.override_triggers) || release_triggers;
                         flush_output(
                             &mut device,
                             &OutputState {
-                                update_rumble: prof.enable_rumble,
-                                motor_left: if prof.enable_rumble { rumble_large } else { 0 },
-                                motor_right: if prof.enable_rumble { rumble_small } else { 0 },
-                                update_lightbar: true,
+                                update_rumble: dirty_rumble,
+                                motor_left: rumble_large,
+                                motor_right: rumble_small,
+                                update_lightbar: update_lb,
                                 lightbar_rgb: effective_rgb,
-                                update_player_leds: true,
+                                update_player_leds: update_lb,
                                 player_leds: last_leds,
-                                update_left_trigger: true,
-                                left_trigger: last_left_trigger,
-                                update_right_trigger: true,
-                                right_trigger: last_right_trigger,
+                                update_left_trigger: update_trig,
+                                left_trigger: if release_triggers {
+                                    AdaptiveTriggerEffect::Off
+                                } else {
+                                    last_left_trigger
+                                },
+                                update_right_trigger: update_trig,
+                                right_trigger: if release_triggers {
+                                    AdaptiveTriggerEffect::Off
+                                } else {
+                                    last_right_trigger
+                                },
                                 ..Default::default()
                             },
                             &mut bt_seq,
                         );
-                        output_dirty = false;
+                        if release_triggers {
+                            triggers_touched = false;
+                        }
+                        dirty_rumble = false;
+                        dirty_lightbar = false;
+                        dirty_triggers = false;
+                        release_triggers = false;
                         last_output_write = Instant::now();
                     }
                 }
@@ -310,6 +377,8 @@ fn session_loop(
             is_edge: info.is_edge,
             transport: info.transport,
             emulation: active_mode,
+            raw_left_stick: [processed.raw_left_x, processed.raw_left_y],
+            raw_right_stick: [processed.raw_right_x, processed.raw_right_y],
             left_stick: [processed.left_x, processed.left_y],
             right_stick: [processed.right_x, processed.right_y],
             l2_analog: processed.l2_analog,
@@ -327,20 +396,23 @@ fn session_loop(
         });
     }
 
-    flush_output(
-        &mut device,
-        &OutputState {
-            update_rumble: true,
-            motor_left: 0,
-            motor_right: 0,
-            update_left_trigger: true,
-            left_trigger: AdaptiveTriggerEffect::Off,
-            update_right_trigger: true,
-            right_trigger: AdaptiveTriggerEffect::Off,
-            ..Default::default()
-        },
-        &mut bt_seq,
-    );
+    let stop_rumble = rumble_large > 0 || rumble_small > 0;
+    if stop_rumble || triggers_touched {
+        flush_output(
+            &mut device,
+            &OutputState {
+                update_rumble: stop_rumble,
+                motor_left: 0,
+                motor_right: 0,
+                update_left_trigger: triggers_touched,
+                left_trigger: AdaptiveTriggerEffect::Off,
+                update_right_trigger: triggers_touched,
+                right_trigger: AdaptiveTriggerEffect::Off,
+                ..Default::default()
+            },
+            &mut bt_seq,
+        );
+    }
     drop(target);
     let mut final_snap = telemetry.read();
     final_snap.active = false;

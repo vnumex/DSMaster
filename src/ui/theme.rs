@@ -1,4 +1,4 @@
-use gpui::{Rgba, rgb};
+use gpui::{Rgba, rgb, rgba};
 
 pub const BG: u32 = 0x0D0F13;
 pub const SURFACE: u32 = 0x14171E;
@@ -14,4 +14,9 @@ pub const DANGER: u32 = 0xEF4444;
 #[inline]
 pub fn color(hex: u32) -> Rgba {
     rgb(hex)
+}
+
+#[inline]
+pub fn color_alpha(hex: u32, alpha: u8) -> Rgba {
+    rgba((hex << 8) | alpha as u32)
 }

@@ -1,6 +1,16 @@
-use gpui::{Div, FontWeight, IntoElement, SharedString, Stateful, div, prelude::*, px, relative};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use super::theme::{ACCENT, BORDER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, color};
+use gpui::{
+    Bounds, Div, FontWeight, IntoElement, Pixels, SharedString, Stateful, canvas, div, prelude::*,
+    px, relative,
+};
+
+use super::theme::{
+    ACCENT, BG, BORDER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
+    color_alpha,
+};
+use crate::engine::profile::StickTuning;
 
 pub fn section_card(title: &'static str) -> Div {
     div()
@@ -212,4 +222,220 @@ pub fn setting_row(
                 ),
         )
         .child(control)
+}
+
+fn stick_point_in_circle(x: u8, y: u8, field_px: f32, dot_px: f32) -> (f32, f32) {
+    let nx = (x as f32 - 128.0) / 127.5;
+    let ny = (y as f32 - 128.0) / 127.5;
+    let mag = (nx * nx + ny * ny).sqrt();
+    let (cx, cy) = if mag > 1.0 {
+        (nx / mag, ny / mag)
+    } else {
+        (nx, ny)
+    };
+    let r = (field_px - dot_px) * 0.5 - 2.0;
+    let left = field_px * 0.5 + cx * r - dot_px * 0.5;
+    let top = field_px * 0.5 + cy * r - dot_px * 0.5;
+    (left, top)
+}
+
+pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connected: bool) -> Div {
+    const FIELD_PX: f32 = 120.0;
+    const DOT_PX: f32 = 8.0;
+
+    let (raw_left, raw_top) = stick_point_in_circle(raw[0], raw[1], FIELD_PX, DOT_PX);
+    let (out_left, out_top) = stick_point_in_circle(out[0], out[1], FIELD_PX, DOT_PX);
+
+    let mut field = div()
+        .relative()
+        .size(px(FIELD_PX))
+        .rounded_full()
+        .bg(color(SURFACE_ALT))
+        .border_1()
+        .border_color(color(BORDER))
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .left(px(FIELD_PX * 0.5))
+                .top(px(4.0))
+                .w(px(1.0))
+                .h(px(FIELD_PX - 8.0))
+                .bg(color(BORDER)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(FIELD_PX * 0.5))
+                .left(px(4.0))
+                .h(px(1.0))
+                .w(px(FIELD_PX - 8.0))
+                .bg(color(BORDER)),
+        );
+
+    if tuning.anti_deadzone > 0.001 {
+        let d_anti = (FIELD_PX * tuning.anti_deadzone.clamp(0.0, 0.45)).max(4.0);
+        let offset = (FIELD_PX - d_anti) * 0.5;
+        field = field.child(
+            div()
+                .absolute()
+                .left(px(offset))
+                .top(px(offset))
+                .size(px(d_anti))
+                .rounded_full()
+                .border_1()
+                .border_color(color(WARN))
+                .bg(color_alpha(WARN, 0x18)),
+        );
+    }
+
+    if tuning.deadzone > 0.001 {
+        let d_dz = (FIELD_PX * tuning.deadzone.clamp(0.0, 0.49)).max(4.0);
+        let offset = (FIELD_PX - d_dz) * 0.5;
+        field = field.child(
+            div()
+                .absolute()
+                .left(px(offset))
+                .top(px(offset))
+                .size(px(d_dz))
+                .rounded_full()
+                .border_1()
+                .border_color(color(ACCENT))
+                .bg(color_alpha(ACCENT, 0x2E)),
+        );
+    }
+
+    field = field
+        .child(
+            div()
+                .absolute()
+                .left(px(raw_left))
+                .top(px(raw_top))
+                .size(px(DOT_PX))
+                .rounded_full()
+                .border_2()
+                .border_color(color(TEXT_MUTED))
+                .bg(color(BG)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(out_left))
+                .top(px(out_top))
+                .size(px(DOT_PX))
+                .rounded_full()
+                .bg(color(ACCENT))
+                .border_1()
+                .border_color(color(0xFFFFFF)),
+        );
+
+    let raw_pct = ((((raw[0] as f32 - 128.0) / 127.5).hypot((raw[1] as f32 - 128.0) / 127.5))
+        .min(1.0)
+        * 100.0)
+        .round() as u32;
+    let out_pct = ((((out[0] as f32 - 128.0) / 127.5).hypot((out[1] as f32 - 128.0) / 127.5))
+        .min(1.0)
+        * 100.0)
+        .round() as u32;
+
+    let readout = if connected {
+        format!("In {raw_pct}% -> Out {out_pct}%")
+    } else {
+        "Move stick to test".to_owned()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(field)
+        .child(div().text_xs().text_color(color(TEXT_MUTED)).child(readout))
+        .child(
+            div()
+                .text_xs()
+                .text_color(color(TEXT_MUTED))
+                .child("Ring: Raw | Dot: Out"),
+        )
+}
+
+pub fn slider_bar(
+    fill_ratio: f32,
+    fill_color: u32,
+    bounds_slot: usize,
+    bounds_store: Rc<RefCell<[Bounds<Pixels>; 5]>>,
+) -> Div {
+    let clamped = fill_ratio.clamp(0.0, 1.0);
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .flex_1()
+        .h(px(20.0))
+        .cursor_pointer()
+        .child(
+            div()
+                .w_full()
+                .h(px(6.0))
+                .rounded_full()
+                .bg(color(SURFACE_ALT))
+                .border_1()
+                .border_color(color(BORDER))
+                .overflow_hidden()
+                .child(div().h_full().w(relative(clamped)).bg(color(fill_color))),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(6.0))
+                .right(px(6.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(clamped))
+                        .ml(px(-6.0))
+                        .size(px(12.0))
+                        .rounded_full()
+                        .bg(color(0xFFFFFF))
+                        .border_1()
+                        .border_color(color(fill_color)),
+                ),
+        )
+        .child(
+            div().absolute().inset_0().child(
+                canvas(
+                    move |bounds, _, _| {
+                        bounds_store.borrow_mut()[bounds_slot] = bounds;
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            ),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stick_point_in_circle_centers_and_clamps_diagonals() {
+        let field = 120.0;
+        let dot = 8.0;
+        let (cx, cy) = stick_point_in_circle(128, 128, field, dot);
+        let expected_center = (field - dot) * 0.5;
+        assert!((cx - expected_center).abs() < 0.01);
+        assert!((cy - expected_center).abs() < 0.01);
+
+        let (dx, dy) = stick_point_in_circle(255, 255, field, dot);
+        assert!(dx >= 0.0 && dx <= field - dot);
+        assert!(dy >= 0.0 && dy <= field - dot);
+        let dist_from_center =
+            ((dx + dot * 0.5) - field * 0.5).hypot((dy + dot * 0.5) - field * 0.5);
+        assert!(dist_from_center <= field * 0.5 - 2.0 + 0.01);
+    }
 }
