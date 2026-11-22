@@ -171,42 +171,84 @@ fn paint_stroke(
     }
 }
 
-fn paint_trigger(window: &mut Window, xf: &CanvasXform, x: f32, analog: u8) {
-    let y = 7.0;
-    let w = 48.0;
-    let h = 19.0;
-    paint_fill(window, color(SURFACE_ALT), |b| {
-        add_rounded_rect(b, xf, x, y, w, h, 5.0);
+fn lerp_rgb(from: u32, to: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let r0 = ((from >> 16) & 0xFF) as f32;
+    let g0 = ((from >> 8) & 0xFF) as f32;
+    let b0 = (from & 0xFF) as f32;
+    let r1 = ((to >> 16) & 0xFF) as f32;
+    let g1 = ((to >> 8) & 0xFF) as f32;
+    let b1 = (to & 0xFF) as f32;
+    let r = (r0 + (r1 - r0) * t).round() as u32;
+    let g = (g0 + (g1 - g0) * t).round() as u32;
+    let b = (b0 + (b1 - b0) * t).round() as u32;
+    (r << 16) | (g << 8) | b
+}
+
+#[inline]
+fn mirror_x(x: f32, is_right: bool) -> f32 {
+    if is_right { LOGICAL_W - x } else { x }
+}
+
+fn add_trigger_shape(b: &mut PathBuilder, xf: &CanvasXform, is_right: bool, dy: f32) {
+    let mx = |x: f32| mirror_x(x, is_right);
+    b.move_to(xf.pt(mx(57.0), 40.0));
+    b.cubic_bezier_to(
+        xf.pt(mx(63.0), 17.0 + dy),
+        xf.pt(mx(58.0), 29.0 + dy),
+        xf.pt(mx(60.0), 21.0 + dy),
+    );
+    b.cubic_bezier_to(
+        xf.pt(mx(89.0), 15.0 + dy),
+        xf.pt(mx(69.0), 13.0 + dy),
+        xf.pt(mx(83.0), 13.0 + dy),
+    );
+    b.cubic_bezier_to(
+        xf.pt(mx(95.0), 36.0),
+        xf.pt(mx(93.0), 18.0 + dy),
+        xf.pt(mx(94.5), 27.0 + dy),
+    );
+    b.close();
+}
+
+fn paint_trigger(window: &mut Window, xf: &CanvasXform, is_right: bool, analog: u8) {
+    let ratio = (analog as f32 / 255.0).clamp(0.0, 1.0);
+    let dy = ratio * 3.5;
+    let fill = lerp_rgb(SURFACE_ALT, PRIMARY, ratio);
+    let border = lerp_rgb(BORDER_STRONG, PRIMARY, ratio);
+
+    paint_fill(window, color(fill), |b| {
+        add_trigger_shape(b, xf, is_right, dy);
     });
-    if analog > 0 {
-        let ratio = (analog as f32 / 255.0).clamp(0.0, 1.0);
-        let fill_h = (h * ratio).max(2.0);
-        let fill_y = y + (h - fill_h);
-        paint_fill(window, color(PRIMARY), |b| {
-            add_rounded_rect(b, xf, x, fill_y, w, fill_h, 4.0);
-        });
-    }
-    let border_col = if analog > 12 {
-        color(PRIMARY)
-    } else {
-        color(BORDER_STRONG)
-    };
-    paint_stroke(window, xf.len(1.1), border_col, |b| {
-        add_rounded_rect(b, xf, x, y, w, h, 5.0);
+    paint_stroke(window, xf.len(1.1), color(border), |b| {
+        add_trigger_shape(b, xf, is_right, dy);
     });
 }
 
-fn paint_bumper(window: &mut Window, xf: &CanvasXform, x: f32, pressed: bool) {
-    let y = 28.0;
-    let w = 56.0;
-    let h = 11.0;
-    let fill = if pressed { PRIMARY } else { SURFACE_ALT };
+fn add_bumper_shape(b: &mut PathBuilder, xf: &CanvasXform, is_right: bool, dy: f32) {
+    let mx = |x: f32| mirror_x(x, is_right);
+    b.move_to(xf.pt(mx(46.0), 50.0));
+    b.line_to(xf.pt(mx(48.0), 42.0 + dy));
+    b.cubic_bezier_to(
+        xf.pt(mx(102.0), 30.0 + dy),
+        xf.pt(mx(58.0), 33.0 + dy),
+        xf.pt(mx(82.0), 29.5 + dy),
+    );
+    b.curve_to(xf.pt(mx(106.0), 35.0 + dy), xf.pt(mx(106.0), 30.5 + dy));
+    b.line_to(xf.pt(mx(106.0), 43.0));
+    b.close();
+}
+
+fn paint_bumper(window: &mut Window, xf: &CanvasXform, is_right: bool, pressed: bool) {
+    let dy = if pressed { 1.6 } else { 0.0 };
+    let fill = if pressed { PRIMARY } else { 0x1C1C21 };
     let border = if pressed { PRIMARY } else { BORDER_STRONG };
+
     paint_fill(window, color(fill), |b| {
-        add_rounded_rect(b, xf, x, y, w, h, 4.0);
+        add_bumper_shape(b, xf, is_right, dy);
     });
-    paint_stroke(window, xf.len(1.0), color(border), |b| {
-        add_rounded_rect(b, xf, x, y, w, h, 4.0);
+    paint_stroke(window, xf.len(1.1), color(border), |b| {
+        add_bumper_shape(b, xf, is_right, dy);
     });
 }
 
@@ -373,11 +415,11 @@ fn paint_dualsense(
     let snap = state.snap;
     let b = snap.buttons;
 
-    // 1. L2 & R2 analog triggers + L1 & R1 bumpers
-    paint_trigger(window, &xf, 46.0, snap.l2_analog);
-    paint_trigger(window, &xf, 246.0, snap.r2_analog);
-    paint_bumper(window, &xf, 42.0, b.contains(DualSenseButtons::L1));
-    paint_bumper(window, &xf, 242.0, b.contains(DualSenseButtons::R1));
+    // 1. L2 & R2 contoured analog triggers + L1 & R1 contoured shoulder bumpers
+    paint_trigger(window, &xf, false, snap.l2_analog);
+    paint_trigger(window, &xf, true, snap.r2_analog);
+    paint_bumper(window, &xf, false, b.contains(DualSenseButtons::L1));
+    paint_bumper(window, &xf, true, b.contains(DualSenseButtons::R1));
 
     // 2. DualSense shell + lower V-trim
     paint_fill(window, color(0x141418), |p| add_dualsense_body(p, &xf));
