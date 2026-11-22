@@ -4,6 +4,7 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Sender, bounded};
 use parking_lot::Mutex;
+use tracing::warn;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE,
     HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -15,15 +16,16 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, DispatchMessageW, FindWindowW, GWLP_USERDATA, GetCursorPos, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, HICON, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR,
-    LR_SHARED, LoadImageW, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON,
-    SM_CYICON, SM_CYSMICON, SW_RESTORE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETICON, WNDCLASSW, WS_OVERLAPPED,
+    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GWLP_USERDATA,
+    GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON, ICON_BIG, ICON_SMALL,
+    IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, LoadImageW, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
+    WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WM_SETICON, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::PCWSTR;
 
@@ -280,7 +282,9 @@ fn run_tray_loop(
     }
 
     let initial_tip = state.lock().tooltip();
-    let _ = add_tray_icon(hwnd, hicon, &initial_tip);
+    if !add_tray_icon(hwnd, hicon, &initial_tip) {
+        warn!("Shell_NotifyIconW(NIM_ADD) failed for system tray icon");
+    }
 
     msg_hwnd.store(hwnd.0 as isize, Ordering::Release);
     let _ = ready_tx.send(true);
@@ -503,31 +507,100 @@ fn show_context_menu(hwnd: HWND, ctx: &TrayWindowCtx) {
 }
 
 const APP_ICON_RESOURCE_ID: usize = 1;
+const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
+
+fn select_ico_frame(data: &[u8], desired_w: i32, desired_h: i32) -> Option<&[u8]> {
+    if data.len() < 6 {
+        return None;
+    }
+    let reserved = u16::from_le_bytes([data[0], data[1]]);
+    let ico_type = u16::from_le_bytes([data[2], data[3]]);
+    let count = u16::from_le_bytes([data[4], data[5]]) as usize;
+    if reserved != 0 || ico_type != 1 || count == 0 || data.len() < 6 + count * 16 {
+        return None;
+    }
+
+    let target = desired_w.max(desired_h).max(16);
+    let mut best_ge: Option<(i32, &[u8])> = None;
+    let mut best_any: Option<(i32, &[u8])> = None;
+
+    for idx in 0..count {
+        let base = 6 + idx * 16;
+        let w = if data[base] == 0 {
+            256
+        } else {
+            data[base] as i32
+        };
+        let h = if data[base + 1] == 0 {
+            256
+        } else {
+            data[base + 1] as i32
+        };
+        let size = u32::from_le_bytes([
+            data[base + 8],
+            data[base + 9],
+            data[base + 10],
+            data[base + 11],
+        ]) as usize;
+        let offset = u32::from_le_bytes([
+            data[base + 12],
+            data[base + 13],
+            data[base + 14],
+            data[base + 15],
+        ]) as usize;
+        let Some(end) = offset.checked_add(size) else {
+            continue;
+        };
+        if end > data.len() || size == 0 {
+            continue;
+        }
+        let frame = &data[offset..end];
+        let dim = w.min(h);
+        if w == desired_w && h == desired_h {
+            return Some(frame);
+        }
+        if dim >= target && best_ge.is_none_or(|(best_d, _)| dim < best_d) {
+            best_ge = Some((dim, frame));
+        }
+        if best_any.is_none_or(|(best_d, _)| dim > best_d) {
+            best_any = Some((dim, frame));
+        }
+    }
+
+    best_ge.or(best_any).map(|(_, frame)| frame)
+}
+
+fn load_embedded_icon(width: i32, height: i32) -> Option<HICON> {
+    let frame = select_ico_frame(APP_ICON_BYTES, width, height)?;
+    unsafe {
+        CreateIconFromResourceEx(frame, true, 0x0003_0000, width, height, LR_DEFAULTCOLOR).ok()
+    }
+}
 
 fn load_app_icon(width: i32, height: i32, shared: bool) -> Option<HICON> {
-    let hmod = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
-    let hinstance = HINSTANCE(hmod.0);
-    let flags = if shared {
-        LR_DEFAULTCOLOR | LR_SHARED
-    } else {
-        LR_DEFAULTCOLOR
-    };
-    let handle = unsafe {
-        LoadImageW(
-            Some(hinstance),
-            PCWSTR(APP_ICON_RESOURCE_ID as *const u16),
-            IMAGE_ICON,
-            width,
-            height,
-            flags,
-        )
+    if let Ok(hmod) = unsafe { GetModuleHandleW(PCWSTR::null()) } {
+        let hinstance = HINSTANCE(hmod.0);
+        let flags = if shared {
+            LR_DEFAULTCOLOR | LR_SHARED
+        } else {
+            LR_DEFAULTCOLOR
+        };
+        if let Ok(handle) = unsafe {
+            LoadImageW(
+                Some(hinstance),
+                PCWSTR(APP_ICON_RESOURCE_ID as *const u16),
+                IMAGE_ICON,
+                width,
+                height,
+                flags,
+            )
+        } {
+            if !handle.is_invalid() {
+                return Some(HICON(handle.0));
+            }
+        }
     }
-    .ok()?;
-    if handle.is_invalid() {
-        None
-    } else {
-        Some(HICON(handle.0))
-    }
+    load_embedded_icon(width, height)
 }
 
 pub fn apply_window_icon(raw_hwnd: isize) {
@@ -584,5 +657,11 @@ mod tests {
         let tip = state.tooltip();
         assert!(tip.encode_utf16().count() <= 127);
         assert!(tip.starts_with("DSMaster - Xbox 360"));
+    }
+
+    #[test]
+    fn embedded_ico_selects_expected_frames() {
+        assert!(select_ico_frame(APP_ICON_BYTES, 16, 16).is_some());
+        assert!(select_ico_frame(APP_ICON_BYTES, 32, 32).is_some());
     }
 }

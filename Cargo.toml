@@ -14,7 +14,7 @@ arc-swap = "1.9"
 bitflags = "2"
 crc32fast = "1.5"
 crossbeam-channel = "0.5"
-gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui = { version = "0.2.2", default-features = false }
 parking_lot = "0.12"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }

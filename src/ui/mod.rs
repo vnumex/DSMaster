@@ -309,15 +309,11 @@ impl DsMasterView {
         self.window_ctl
             .work_in_background
             .store(self.config.work_in_background, Ordering::Release);
-        if self.config.work_in_background {
-            let state = self.build_tray_state();
-            if let Some(tray) = &self.tray {
-                tray.update_state(state);
-            } else {
-                self.tray = SystemTray::start(self.tray_tx.clone(), state);
-            }
+        let state = self.build_tray_state();
+        if let Some(tray) = &self.tray {
+            tray.update_state(state);
         } else {
-            self.tray = None;
+            self.tray = SystemTray::start(self.tray_tx.clone(), state);
         }
     }
 
@@ -1457,15 +1453,13 @@ impl DsMasterView {
                         .items_center()
                         .gap_2()
                         .pt_1()
-                        .child(if bg_on {
-                            pill_button("set-hide-tray", "Hide to Tray", false)
-                                .on_click(cx.listener(|this, _, _, cx| {
+                        .child(
+                            pill_button("set-hide-tray", "Hide to Tray", false).on_click(
+                                cx.listener(|this, _, _, cx| {
                                     this.hide_to_tray(cx);
-                                }))
-                                .into_any_element()
-                        } else {
-                            coming_soon_pill("Background Mode Off").into_any_element()
-                        })
+                                }),
+                            ),
+                        )
                         .child(pill_button("set-quit", "Quit DSMaster", false).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.quit_app(cx);
