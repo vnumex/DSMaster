@@ -22,7 +22,7 @@ use self::theme::{
 };
 use self::widgets::{
     coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button, section_card,
-    section_card_with_action, setting_row, sidebar_item, sidebar_profile_item, slider_bar,
+    section_card_with_action, setting_row, sidebar_item, slider_bar,
 };
 use crate::emu::EmulationMode;
 use crate::engine::profile::{
@@ -40,7 +40,6 @@ use crate::tray::{SystemTray, TrayAction, TrayState};
 enum ActiveTab {
     Overview,
     Tuning,
-    Profiles,
     Settings,
 }
 
@@ -49,7 +48,6 @@ impl ActiveTab {
         match self {
             Self::Overview => "Overview",
             Self::Tuning => "Tuning & Remap",
-            Self::Profiles => "Profiles",
             Self::Settings => "Settings",
         }
     }
@@ -58,7 +56,6 @@ impl ActiveTab {
         match self {
             Self::Overview => "Controller status, emulation mode, triggers, and live input monitor",
             Self::Tuning => "Stick deadzones, response curves, triggers, and motion mouse",
-            Self::Profiles => "Create profiles and link them to foreground applications",
             Self::Settings => "Background behavior, startup, drivers, and configuration",
         }
     }
@@ -424,6 +421,55 @@ impl DsMasterView {
         if self.active_slider.take().is_some() {
             self.commit_config(cx);
         }
+    }
+
+    fn create_profile(&mut self, cx: &mut Context<Self>) {
+        let mut n = 2usize;
+        while self
+            .config
+            .profiles
+            .iter()
+            .any(|p| p.name == format!("Profile {n}"))
+        {
+            n += 1;
+        }
+        let name = format!("Profile {n}");
+        let settings = self.config.active_settings();
+        self.config.profiles.push(NamedProfile {
+            name: name.clone(),
+            linked_exe: None,
+            settings,
+        });
+        self.config.active_profile = name;
+        self.commit_config(cx);
+    }
+
+    fn delete_profile(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.config.profiles.len() <= 1 {
+            return;
+        }
+        self.config.profiles.retain(|p| p.name != name);
+        if self.config.active_profile == name {
+            if let Some(first) = self.config.profiles.first() {
+                self.config.active_profile = first.name.clone();
+            }
+        }
+        self.commit_config(cx);
+    }
+
+    fn unlink_profile_app(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(prof) = self.config.profiles.iter_mut().find(|p| p.name == name) {
+            prof.linked_exe = None;
+        }
+        self.commit_config(cx);
+    }
+
+    fn link_active_profile_to_app(&mut self, exe: String, cx: &mut Context<Self>) {
+        let active = self.config.active_profile.clone();
+        if let Some(prof) = self.config.profiles.iter_mut().find(|p| p.name == active) {
+            prof.linked_exe = Some(exe);
+        }
+        self.commit_config(cx);
     }
 
     fn render_slider_row(
@@ -1181,175 +1227,6 @@ impl DsMasterView {
             .child(motion_card)
     }
 
-    fn render_profiles(&self, cx: &mut Context<Self>) -> Div {
-        let last_exe = self.engine.as_ref().and_then(|e| e.last_foreground_exe());
-
-        let mut controls = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(
-                pill_button("new-profile", "+ New Profile", false).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let idx = this.config.profiles.len() + 1;
-                        let name = format!("Profile {idx}");
-                        let settings = this.config.active_settings();
-                        this.config.profiles.push(NamedProfile {
-                            name: name.clone(),
-                            linked_exe: None,
-                            settings,
-                        });
-                        this.config.active_profile = name;
-                        this.commit_config(cx);
-                    },
-                )),
-            )
-            .child(
-                pill_button(
-                    "auto-switch-toggle",
-                    if self.config.auto_switch_profiles {
-                        "Auto-Switch by App: On"
-                    } else {
-                        "Auto-Switch by App: Off"
-                    },
-                    self.config.auto_switch_profiles,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.config.auto_switch_profiles = !this.config.auto_switch_profiles;
-                    this.commit_config(cx);
-                })),
-            );
-
-        if let Some(exe) = &last_exe {
-            let exe_clone = exe.clone();
-            controls = controls.child(
-                pill_button("link-last-app", format!("Link Active to {exe}"), false).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        let active = this.config.active_profile.clone();
-                        if let Some(p) = this.config.profiles.iter_mut().find(|p| p.name == active)
-                        {
-                            p.linked_exe = Some(exe_clone.clone());
-                        }
-                        this.commit_config(cx);
-                    }),
-                ),
-            );
-        } else {
-            controls = controls.child(
-                div()
-                    .text_xs()
-                    .text_color(color(TEXT_MUTED))
-                    .child("Focus any game/app window to bind it to the active profile"),
-            );
-        }
-
-        let mut list = div().flex().flex_col().gap_2();
-        let total = self.config.profiles.len();
-        for (idx, p) in self.config.profiles.iter().enumerate() {
-            let is_active = p.name == self.config.active_profile;
-            let name_sel = p.name.clone();
-            let name_del = p.name.clone();
-            let name_unlink = p.name.clone();
-            let linked = p.linked_exe.as_deref().unwrap_or("No linked app");
-
-            let mut row = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .bg(color(SURFACE))
-                .border_1()
-                .border_color(color(if is_active { BORDER_STRONG } else { BORDER }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            pill_button(
-                                SharedString::from(format!("prof-sel-{idx}")),
-                                if is_active { "Active" } else { "Activate" },
-                                is_active,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.config.active_profile = name_sel.clone();
-                                    this.commit_config(cx);
-                                },
-                            )),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(color(TEXT))
-                                .child(p.name.clone()),
-                        )
-                        .child(div().text_xs().text_color(color(TEXT_MUTED)).child(format!(
-                            "{:?} | {} | {}",
-                            p.settings.emulation,
-                            p.settings.button_preset.label(),
-                            linked
-                        ))),
-                );
-
-            let mut actions = div().flex().items_center().gap_1p5();
-            if p.linked_exe.is_some() {
-                actions = actions.child(
-                    pill_button(
-                        SharedString::from(format!("prof-unlink-{idx}")),
-                        "Unlink App",
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(prof) = this
-                            .config
-                            .profiles
-                            .iter_mut()
-                            .find(|x| x.name == name_unlink)
-                        {
-                            prof.linked_exe = None;
-                        }
-                        this.commit_config(cx);
-                    })),
-                );
-            }
-            if total > 1 {
-                actions = actions.child(
-                    pill_button(
-                        SharedString::from(format!("prof-del-{idx}")),
-                        "Delete",
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.config.profiles.retain(|x| x.name != name_del);
-                        if this.config.active_profile == name_del {
-                            if let Some(first) = this.config.profiles.first() {
-                                this.config.active_profile = first.name.clone();
-                            }
-                        }
-                        this.commit_config(cx);
-                    })),
-                );
-            }
-            row = row.child(actions);
-            list = list.child(row);
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .gap_3()
-            .child(section_card("Profile Controls").child(controls))
-            .child(list)
-    }
-
     fn render_settings(&self, cx: &mut Context<Self>) -> Div {
         let bg_on = self.config.work_in_background;
         let start_min_on = self.config.start_minimized;
@@ -1547,29 +1424,6 @@ impl DsMasterView {
                         this.config.active_settings_mut().override_lightbar = false;
                         this.commit_config(cx);
                     })),
-                ))
-                .child(setting_row(
-                    "Active Profile",
-                    "Manage profiles and app bindings in the Profiles tab",
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(color(TEXT))
-                                .child(self.config.active_profile.clone()),
-                        )
-                        .child(
-                            pill_button("set-open-profiles", "Open Profiles", false).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.tab = ActiveTab::Profiles;
-                                    cx.notify();
-                                }),
-                            ),
-                        ),
                 ));
 
         let cfg_path_str = config_path()
@@ -1690,29 +1544,187 @@ impl Render for DsMasterView {
             .map(Engine::is_cloak_enabled)
             .unwrap_or(self.config.cloak_physical);
 
-        let mut profile_switcher = div().flex().flex_col().gap_1().child(
-            div()
-                .px_2()
-                .pb_1()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(color(TEXT_MUTED))
-                .child("Profiles"),
-        );
-        for (idx, p) in self.config.profiles.iter().take(4).enumerate() {
+        let total_profiles = self.config.profiles.len();
+        let last_fg_exe = self.engine.as_ref().and_then(|e| e.last_foreground_exe());
+        let active_linked_exe = self
+            .config
+            .profiles
+            .iter()
+            .find(|p| p.name == self.config.active_profile)
+            .and_then(|p| p.linked_exe.as_deref());
+
+        let mut profiles_list = div()
+            .id("sb-profiles-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(210.0))
+            .overflow_y_scroll();
+
+        for (idx, p) in self.config.profiles.iter().enumerate() {
             let active = p.name == self.config.active_profile;
-            let name = p.name.clone();
-            profile_switcher = profile_switcher.child(
-                sidebar_profile_item(
-                    SharedString::from(format!("hdr-prof-{idx}")),
-                    p.name.clone(),
-                    active,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.config.active_profile = name.clone();
-                    this.commit_config(cx);
-                })),
+            let name_sel = p.name.clone();
+            let name_del = p.name.clone();
+            let name_unlink = p.name.clone();
+
+            let mut top_row = div().flex().items_center().justify_between().gap_1().child(
+                div()
+                    .id(SharedString::from(format!("sb-prof-{idx}")))
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color(if active { TEXT } else { TEXT_MUTED }))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(color(TEXT)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.config.active_profile = name_sel.clone();
+                        this.commit_config(cx);
+                    }))
+                    .child(p.name.clone()),
             );
+
+            if total_profiles > 1 {
+                top_row = top_row.child(
+                    div()
+                        .id(SharedString::from(format!("sb-prof-del-{idx}")))
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(color(TEXT_MUTED))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(color(SURFACE_HOVER)).text_color(color(DANGER)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete_profile(&name_del, cx);
+                        }))
+                        .child("x"),
+                );
+            }
+
+            let mut item = div()
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(color(if active { BORDER_STRONG } else { SIDEBAR_BG }))
+                .bg(color(if active { SURFACE_ALT } else { SIDEBAR_BG }))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(top_row);
+
+            if let Some(exe) = &p.linked_exe {
+                item = item.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_1()
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .text_xs()
+                                .font_family(FONT_MONO)
+                                .text_color(color(TEXT_MUTED))
+                                .child(exe.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("sb-prof-unlink-{idx}")))
+                                .px_1()
+                                .rounded_sm()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(color(TEXT_MUTED))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(color(SURFACE_HOVER)).text_color(color(TEXT)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.unlink_profile_app(&name_unlink, cx);
+                                }))
+                                .child("unlink"),
+                        ),
+                );
+            }
+
+            profiles_list = profiles_list.child(item);
+        }
+
+        let mut profile_switcher = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color(TEXT_MUTED))
+                            .child("Profiles"),
+                    )
+                    .child(
+                        div()
+                            .id("sb-new-profile")
+                            .w(px(20.0))
+                            .h(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(color(BORDER))
+                            .bg(color(SURFACE_ALT))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color(TEXT))
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.bg(color(SURFACE_HOVER))
+                                    .border_color(color(BORDER_STRONG))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create_profile(cx);
+                            }))
+                            .child("+"),
+                    ),
+            )
+            .child(profiles_list);
+
+        if let Some(exe) = last_fg_exe {
+            let already_linked = active_linked_exe.is_some_and(|e| e.eq_ignore_ascii_case(&exe));
+            if !already_linked {
+                let exe_clone = exe.clone();
+                profile_switcher = profile_switcher.child(
+                    div()
+                        .id("sb-link-app")
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(color(BORDER))
+                        .bg(color(SURFACE_ALT))
+                        .text_xs()
+                        .text_color(color(TEXT_MUTED))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(color(SURFACE_HOVER)).text_color(color(TEXT)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.link_active_profile_to_app(exe_clone.clone(), cx);
+                        }))
+                        .child(format!("Link to {exe}")),
+                );
+            }
         }
 
         let controller_footer = if let Some(s) = self.selected_snapshot() {
@@ -1806,19 +1818,6 @@ impl Render for DsMasterView {
                             )
                             .child(
                                 sidebar_item(
-                                    "tab-profiles",
-                                    "Profiles",
-                                    self.tab == ActiveTab::Profiles,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.tab = ActiveTab::Profiles;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                sidebar_item(
                                     "tab-settings",
                                     "Settings",
                                     self.tab == ActiveTab::Settings,
@@ -1900,7 +1899,6 @@ impl Render for DsMasterView {
         let body = match self.tab {
             ActiveTab::Overview => self.render_overview(cx),
             ActiveTab::Tuning => self.render_tuning(cx),
-            ActiveTab::Profiles => self.render_profiles(cx),
             ActiveTab::Settings => self.render_settings(cx),
         };
 

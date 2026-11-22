@@ -121,37 +121,6 @@ pub fn sidebar_item(
         .child(label.into())
 }
 
-pub fn sidebar_profile_item(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    active: bool,
-) -> Stateful<Div> {
-    let bg = if active { SURFACE_ALT } else { SIDEBAR_BG };
-    let border = if active { BORDER_STRONG } else { SIDEBAR_BG };
-    let text = if active { TEXT } else { TEXT_MUTED };
-    div()
-        .id(id.into())
-        .w_full()
-        .px_2p5()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(color(border))
-        .bg(color(bg))
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color(text))
-        .cursor_pointer()
-        .hover(move |s| {
-            if active {
-                s
-            } else {
-                s.bg(color(SURFACE_ALT)).text_color(color(TEXT))
-            }
-        })
-        .child(label.into())
-}
-
 pub fn coming_soon_pill(label: &'static str) -> Div {
     div()
         .px_2p5()
