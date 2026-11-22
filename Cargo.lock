@@ -1092,6 +1092,7 @@ dependencies = [
  "bitflags 2.13.2",
  "crc32fast",
  "crossbeam-channel",
+ "embed-resource",
  "gpui",
  "parking_lot",
  "raw-window-handle",

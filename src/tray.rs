@@ -8,7 +8,6 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE,
     HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject, HGDIOBJ};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
@@ -16,16 +15,17 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GWLP_USERDATA, GetCursorPos,
-    GetMessageW, GetWindowLongPtrW, HICON, ICONINFO, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
-    MF_STRING, MF_UNCHECKED, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SW_RESTORE, SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DispatchMessageW, FindWindowW, GWLP_USERDATA, GetCursorPos, GetMessageW,
+    GetSystemMetrics, GetWindowLongPtrW, HICON, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR,
+    LR_SHARED, LoadImageW, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON,
+    SM_CYICON, SM_CYSMICON, SW_RESTORE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETICON, WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::{BOOL, PCWSTR};
+use windows::core::PCWSTR;
 
 use crate::emu::EmulationMode;
 
@@ -502,72 +502,69 @@ fn show_context_menu(hwnd: HWND, ctx: &TrayWindowCtx) {
     }
 }
 
-fn create_tray_icon() -> Option<HICON> {
-    const W: usize = 32;
-    const H: usize = 32;
-    let mut pixels = vec![0u8; W * H * 4];
-    for y in 0..H {
-        for x in 0..W {
-            let idx = (y * W + x) * 4;
-            let dx = x as f32 - 15.5;
-            let dy = y as f32 - 15.5;
-            let dist = (dx * dx + dy * dy).sqrt();
+const APP_ICON_RESOURCE_ID: usize = 1;
 
-            let is_corner_cut = !(3..W - 3).contains(&x) && !(3..H - 3).contains(&y);
-            if is_corner_cut {
-                continue;
-            }
-
-            let is_border = x == 0 || x == W - 1 || y == 0 || y == H - 1;
-            let is_ring = (7.2..=10.4).contains(&dist);
-            let is_center = dist <= 3.8;
-
-            let (r, g, b, a) = if is_border {
-                (0x32, 0x38, 0x46, 0xFF)
-            } else if is_ring {
-                (0x3B, 0x82, 0xF6, 0xFF)
-            } else if is_center {
-                (0xE6, 0xE9, 0xEF, 0xFF)
-            } else {
-                (0x18, 0x1A, 0x20, 0xFF)
-            };
-
-            pixels[idx] = b;
-            pixels[idx + 1] = g;
-            pixels[idx + 2] = r;
-            pixels[idx + 3] = a;
-        }
-    }
-
-    let mask = [0u8; (W / 8) * H];
-    let hbm_color =
-        unsafe { CreateBitmap(W as i32, H as i32, 1, 32, Some(pixels.as_ptr().cast())) };
-    let hbm_mask = unsafe { CreateBitmap(W as i32, H as i32, 1, 1, Some(mask.as_ptr().cast())) };
-    if hbm_color.is_invalid() || hbm_mask.is_invalid() {
-        unsafe {
-            if !hbm_color.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(hbm_color.0));
-            }
-            if !hbm_mask.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(hbm_mask.0));
-            }
-        }
-        return None;
-    }
-
-    let info = ICONINFO {
-        fIcon: BOOL(1),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: hbm_mask,
-        hbmColor: hbm_color,
+fn load_app_icon(width: i32, height: i32, shared: bool) -> Option<HICON> {
+    let hmod = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
+    let hinstance = HINSTANCE(hmod.0);
+    let flags = if shared {
+        LR_DEFAULTCOLOR | LR_SHARED
+    } else {
+        LR_DEFAULTCOLOR
     };
-    let hicon = unsafe { CreateIconIndirect(&info) }.ok();
-    unsafe {
-        let _ = DeleteObject(HGDIOBJ(hbm_color.0));
-        let _ = DeleteObject(HGDIOBJ(hbm_mask.0));
+    let handle = unsafe {
+        LoadImageW(
+            Some(hinstance),
+            PCWSTR(APP_ICON_RESOURCE_ID as *const u16),
+            IMAGE_ICON,
+            width,
+            height,
+            flags,
+        )
     }
-    hicon
+    .ok()?;
+    if handle.is_invalid() {
+        None
+    } else {
+        Some(HICON(handle.0))
+    }
+}
+
+pub fn apply_window_icon(raw_hwnd: isize) {
+    if raw_hwnd == 0 {
+        return;
+    }
+    let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+    let big_w = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
+    let big_h = unsafe { GetSystemMetrics(SM_CYICON) }.max(32);
+    if let Some(big) = load_app_icon(big_w, big_h, true) {
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(big.0 as isize)),
+            );
+        }
+    }
+    let small_w = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    let small_h = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+    if let Some(small) = load_app_icon(small_w, small_h, true) {
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL as usize)),
+                Some(LPARAM(small.0 as isize)),
+            );
+        }
+    }
+}
+
+fn create_tray_icon() -> Option<HICON> {
+    let w = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    let h = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+    load_app_icon(w, h, false)
 }
 
 #[cfg(test)]

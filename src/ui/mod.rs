@@ -15,11 +15,13 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow};
 
 use self::theme::{
-    ACCENT, BG, BORDER, DANGER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
+    BG, BORDER, BORDER_STRONG, DANGER, FONT_MONO, FONT_SANS, PRIMARY, SIDEBAR_BG, SURFACE,
+    SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
 };
 use self::widgets::{
     button_pill, coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button,
-    section_card, section_card_with_action, setting_row, slider_bar, stick_box,
+    section_card, section_card_with_action, setting_row, sidebar_item, sidebar_profile_item,
+    slider_bar, stick_box,
 };
 use crate::emu::EmulationMode;
 use crate::engine::profile::{
@@ -39,6 +41,26 @@ enum ActiveTab {
     Tuning,
     Profiles,
     Settings,
+}
+
+impl ActiveTab {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Tuning => "Tuning & Remap",
+            Self::Profiles => "Profiles",
+            Self::Settings => "Settings",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Overview => "Controller status, emulation mode, triggers, and live input monitor",
+            Self::Tuning => "Stick deadzones, response curves, triggers, and motion mouse",
+            Self::Profiles => "Create profiles and link them to foreground applications",
+            Self::Settings => "Background behavior, startup, drivers, and configuration",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -429,6 +451,7 @@ impl DsMasterView {
                     .child(
                         div()
                             .text_xs()
+                            .font_family(FONT_MONO)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color(TEXT))
                             .child(value_label),
@@ -539,6 +562,7 @@ impl DsMasterView {
                 .items_center()
                 .gap_3()
                 .text_xs()
+                .font_family(FONT_MONO)
                 .text_color(color(TEXT_MUTED))
                 .child(format!("Battery: {bat_label}"))
                 .child(format!("Poll: {:.0} Hz", s.polling_hz))
@@ -587,7 +611,7 @@ impl DsMasterView {
                 )
         };
 
-        let emu_card = section_card("EMULATION MODE").child(
+        let emu_card = section_card("Emulation Mode").child(
             div()
                 .flex()
                 .flex_wrap()
@@ -677,7 +701,7 @@ impl DsMasterView {
         }
 
         let triggers_card = section_card_with_action(
-            "ADAPTIVE TRIGGERS",
+            "Adaptive Triggers",
             pill_button(
                 "trig-untouched",
                 "Default (Untouched)",
@@ -706,7 +730,7 @@ impl DsMasterView {
                     .py_1()
                     .rounded_sm()
                     .border_1()
-                    .border_color(color(if active { ACCENT } else { BORDER }))
+                    .border_color(color(if active { PRIMARY } else { BORDER }))
                     .bg(color(SURFACE_ALT))
                     .cursor_pointer()
                     .hover(|s| s.bg(color(SURFACE_HOVER)))
@@ -805,7 +829,7 @@ impl DsMasterView {
             );
 
         let hardware_card = section_card_with_action(
-            "LIGHTBAR, LEDS & QUICK TOGGLES",
+            "Lightbar & Controls",
             pill_button(
                 "rgb-untouched",
                 "Default (Untouched)",
@@ -827,7 +851,7 @@ impl DsMasterView {
         let dpad_left = matches!(s.dpad, DPad::West | DPad::NorthWest | DPad::SouthWest);
         let dpad_right = matches!(s.dpad, DPad::East | DPad::NorthEast | DPad::SouthEast);
 
-        let monitor_card = section_card("LIVE INPUT MONITOR")
+        let monitor_card = section_card("Live Input Monitor")
             .flex_1()
             .child(
                 div()
@@ -842,8 +866,8 @@ impl DsMasterView {
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .child(meter_row("L2", s.l2_analog, ACCENT))
-                    .child(meter_row("R2", s.r2_analog, ACCENT))
+                    .child(meter_row("L2", s.l2_analog, PRIMARY))
+                    .child(meter_row("R2", s.r2_analog, PRIMARY))
                     .child(meter_row("Rumble L", s.rumble_large, WARN))
                     .child(meter_row("Rumble R", s.rumble_small, WARN)),
             )
@@ -896,8 +920,8 @@ impl DsMasterView {
                         div()
                             .flex()
                             .flex_col()
-                            .w(px(420.0))
-                            .flex_shrink_0()
+                            .flex_1()
+                            .min_w(px(0.0))
                             .gap_2p5()
                             .child(emu_card)
                             .child(triggers_card)
@@ -934,7 +958,7 @@ impl DsMasterView {
             "Deadzone",
             format!("{}%", (tuning.deadzone * 100.0).round() as u32),
             tuning.deadzone / MAX_STICK_DZ,
-            ACCENT,
+            PRIMARY,
             dz_slider,
             cx,
         );
@@ -1002,7 +1026,7 @@ impl DsMasterView {
         let connected = !self.handles.is_empty();
 
         let left_card = self.render_stick_card(
-            "LEFT STICK TUNING",
+            "Left Stick",
             "ls",
             profile.left_stick,
             snap.raw_left_stick,
@@ -1012,7 +1036,7 @@ impl DsMasterView {
             cx,
         );
         let right_card = self.render_stick_card(
-            "RIGHT STICK TUNING",
+            "Right Stick",
             "rs",
             profile.right_stick,
             snap.raw_right_stick,
@@ -1027,7 +1051,7 @@ impl DsMasterView {
             "Trigger Deadzone",
             format!("{trig_dz_pct}%"),
             trig_dz_pct as f32 / MAX_TRIGGER_DZ_PCT,
-            ACCENT,
+            PRIMARY,
             ActiveSlider::Trigger,
             cx,
         );
@@ -1073,7 +1097,7 @@ impl DsMasterView {
             );
         }
 
-        let trig_remap_card = section_card("TRIGGERS & BUTTON REMAPPING")
+        let trig_remap_card = section_card("Triggers & Remapping")
             .child(trig_dz_row)
             .child(hair_row)
             .child(remap_row);
@@ -1159,7 +1183,7 @@ impl DsMasterView {
             );
         }
 
-        let motion_card = section_card("TOUCHPAD & GYRO MOUSE")
+        let motion_card = section_card("Touchpad & Gyro Mouse")
             .child(tp_row)
             .child(gyro_mode_row)
             .child(gyro_sens_row);
@@ -1257,7 +1281,7 @@ impl DsMasterView {
                 .rounded_md()
                 .bg(color(SURFACE))
                 .border_1()
-                .border_color(color(if is_active { ACCENT } else { BORDER }))
+                .border_color(color(if is_active { BORDER_STRONG } else { BORDER }))
                 .child(
                     div()
                         .flex()
@@ -1339,7 +1363,7 @@ impl DsMasterView {
             .flex_col()
             .flex_1()
             .gap_3()
-            .child(section_card("PROFILE CONTROLS").child(controls))
+            .child(section_card("Profile Controls").child(controls))
             .child(list)
     }
 
@@ -1356,7 +1380,7 @@ impl DsMasterView {
         let profile = self.config.active_settings();
 
         let bg_card =
-            section_card("BACKGROUND & TRAY")
+            section_card("Background & Tray")
                 .flex_1()
                 .child(setting_row(
                     "Work in Background",
@@ -1463,7 +1487,7 @@ impl DsMasterView {
                 );
 
         let controller_card =
-            section_card("CONTROLLER & PROFILES")
+            section_card("Controller & Profiles")
                 .flex_1()
                 .child(setting_row(
                     "Cloak Physical Controller",
@@ -1571,7 +1595,7 @@ impl DsMasterView {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "%APPDATA%\\DSMaster\\profiles.toml".to_owned());
 
-        let system_card = section_card("SYSTEM & CONFIGURATION")
+        let system_card = section_card("System & Configuration")
             .child(
                 div()
                     .flex()
@@ -1590,6 +1614,7 @@ impl DsMasterView {
                     .child(
                         div()
                             .text_xs()
+                            .font_family(FONT_MONO)
                             .text_color(color(TEXT_MUTED))
                             .child(format!("Config file: {cfg_path_str}")),
                     )
@@ -1684,12 +1709,20 @@ impl Render for DsMasterView {
             .map(Engine::is_cloak_enabled)
             .unwrap_or(self.config.cloak_physical);
 
-        let mut profile_switcher = div().flex().flex_wrap().items_center().gap_1();
+        let mut profile_switcher = div().flex().flex_col().gap_1().child(
+            div()
+                .px_2()
+                .pb_1()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color(TEXT_MUTED))
+                .child("Profiles"),
+        );
         for (idx, p) in self.config.profiles.iter().take(4).enumerate() {
             let active = p.name == self.config.active_profile;
             let name = p.name.clone();
             profile_switcher = profile_switcher.child(
-                pill_button(
+                sidebar_profile_item(
                     SharedString::from(format!("hdr-prof-{idx}")),
                     p.name.clone(),
                     active,
@@ -1701,85 +1734,179 @@ impl Render for DsMasterView {
             );
         }
 
-        let header = div()
+        let controller_footer = if let Some(s) = self.selected_snapshot() {
+            let t = match s.transport {
+                Transport::Usb => "USB",
+                Transport::Bluetooth => "BT",
+            };
+            format!("DualSense ({t}) · {}%", s.battery_percent)
+        } else {
+            "No controller".to_owned()
+        };
+
+        let sidebar = div()
+            .w(px(200.0))
+            .flex_shrink_0()
+            .h_full()
             .flex()
-            .items_center()
+            .flex_col()
             .justify_between()
-            .px_4()
-            .py_2p5()
-            .bg(color(SURFACE))
-            .border_b_1()
+            .bg(color(SIDEBAR_BG))
+            .border_r_1()
             .border_color(color(BORDER))
+            .p_3()
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_4()
                     .child(
                         div()
-                            .text_base()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(color(TEXT))
-                            .child("DSMaster"),
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .px_2()
+                            .pb_3()
+                            .border_b_1()
+                            .border_color(color(BORDER))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(color(TEXT))
+                                    .child("DSMaster"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(TEXT_MUTED))
+                                    .child("DualSense Manager"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .pb_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(color(TEXT_MUTED))
+                                    .child("Menu"),
+                            )
+                            .child(
+                                sidebar_item(
+                                    "tab-overview",
+                                    "Overview",
+                                    self.tab == ActiveTab::Overview,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = ActiveTab::Overview;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                sidebar_item(
+                                    "tab-tuning",
+                                    "Tuning & Remap",
+                                    self.tab == ActiveTab::Tuning,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = ActiveTab::Tuning;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                sidebar_item(
+                                    "tab-profiles",
+                                    "Profiles",
+                                    self.tab == ActiveTab::Profiles,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = ActiveTab::Profiles;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                sidebar_item(
+                                    "tab-settings",
+                                    "Settings",
+                                    self.tab == ActiveTab::Settings,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = ActiveTab::Settings;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     )
                     .child(profile_switcher),
             )
             .child(
-                pill_button(
-                    "cloak-toggle",
-                    if cloak_on { "Cloak: On" } else { "Cloak: Off" },
-                    cloak_on,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_cloak(cx);
-                })),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        div()
+                            .px_1()
+                            .text_xs()
+                            .font_family(FONT_MONO)
+                            .text_color(color(TEXT_MUTED))
+                            .child(controller_footer),
+                    )
+                    .child(
+                        pill_button(
+                            "cloak-toggle",
+                            if cloak_on { "Cloak: On" } else { "Cloak: Off" },
+                            cloak_on,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_cloak(cx);
+                        })),
+                    ),
             );
 
-        let nav_bar = div()
+        let page_header = div()
             .flex()
             .items_center()
             .justify_between()
+            .gap_3()
             .px_4()
-            .py_1p5()
-            .bg(color(BG))
+            .py_3()
             .border_b_1()
             .border_color(color(BORDER))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_2()
+                    .flex_col()
+                    .gap_0p5()
                     .child(
-                        pill_button("tab-overview", "Overview", self.tab == ActiveTab::Overview)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab = ActiveTab::Overview;
-                                cx.notify();
-                            })),
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color(TEXT))
+                            .child(self.tab.title()),
                     )
                     .child(
-                        pill_button(
-                            "tab-tuning",
-                            "Tuning & Remap",
-                            self.tab == ActiveTab::Tuning,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = ActiveTab::Tuning;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        pill_button("tab-profiles", "Profiles", self.tab == ActiveTab::Profiles)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab = ActiveTab::Profiles;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        pill_button("tab-settings", "Settings", self.tab == ActiveTab::Settings)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab = ActiveTab::Settings;
-                                cx.notify();
-                            })),
+                        div()
+                            .text_xs()
+                            .text_color(color(TEXT_MUTED))
+                            .child(self.tab.subtitle()),
                     ),
             )
             .child(
@@ -1798,8 +1925,9 @@ impl Render for DsMasterView {
 
         div()
             .flex()
-            .flex_col()
+            .flex_row()
             .size_full()
+            .font_family(FONT_SANS)
             .bg(color(BG))
             .text_color(color(TEXT))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -1824,18 +1952,27 @@ impl Render for DsMasterView {
                     this.finish_slider_drag(cx);
                 }),
             )
-            .child(header)
-            .child(nav_bar)
+            .child(sidebar)
             .child(
                 div()
-                    .id("main-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .p_4()
-                    .child(body),
+                    .min_w(px(0.0))
+                    .h_full()
+                    .bg(color(BG))
+                    .child(page_header)
+                    .child(
+                        div()
+                            .id("main-scroll")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .p_4()
+                            .child(body),
+                    ),
             )
     }
 }

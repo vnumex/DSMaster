@@ -39,10 +39,10 @@ fn main() {
     let mut engine_opt = Some(Engine::start(initial_config.clone()).map_err(|e| e.to_string()));
 
     Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(960.0), px(660.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1040.0), px(680.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(840.0), px(580.0))),
+            window_min_size: Some(size(px(880.0), px(580.0))),
             show: !start_hidden,
             titlebar: Some(TitlebarOptions {
                 title: Some("DSMaster".into()),
@@ -63,6 +63,8 @@ fn main() {
                     _ => None,
                 })
                 .unwrap_or(0);
+
+            tray::apply_window_icon(raw_hwnd);
 
             let ctl = WindowControlState {
                 raw_hwnd,

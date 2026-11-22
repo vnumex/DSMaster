@@ -1,14 +1,21 @@
 use gpui::{Rgba, rgb, rgba};
 
-pub const BG: u32 = 0x0D0F13;
-pub const SURFACE: u32 = 0x14171E;
-pub const SURFACE_ALT: u32 = 0x1A1E27;
-pub const SURFACE_HOVER: u32 = 0x212633;
-pub const BORDER: u32 = 0x262C3A;
-pub const TEXT: u32 = 0xEEF2F6;
-pub const TEXT_MUTED: u32 = 0x8A94A6;
-pub const ACCENT: u32 = 0x3B82F6;
-pub const WARN: u32 = 0xF59E0B;
+pub const FONT_SANS: &str = "Segoe UI";
+pub const FONT_MONO: &str = "Cascadia Mono";
+
+pub const BG: u32 = 0x09090B;
+pub const SIDEBAR_BG: u32 = 0x0C0C0E;
+pub const SURFACE: u32 = 0x0F0F12;
+pub const SURFACE_ALT: u32 = 0x18181B;
+pub const SURFACE_HOVER: u32 = 0x27272A;
+pub const BORDER: u32 = 0x27272A;
+pub const BORDER_STRONG: u32 = 0x3F3F46;
+pub const TEXT: u32 = 0xFAFAFA;
+pub const TEXT_MUTED: u32 = 0xA1A1AA;
+pub const PRIMARY: u32 = 0xFAFAFA;
+pub const PRIMARY_FG: u32 = 0x09090B;
+pub const PRIMARY_HOVER: u32 = 0xE4E4E7;
+pub const WARN: u32 = 0xEAB308;
 pub const DANGER: u32 = 0xEF4444;
 
 #[inline]

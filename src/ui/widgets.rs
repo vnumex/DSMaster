@@ -7,8 +7,8 @@ use gpui::{
 };
 
 use super::theme::{
-    ACCENT, BG, BORDER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
-    color_alpha,
+    BG, BORDER, BORDER_STRONG, FONT_MONO, PRIMARY, PRIMARY_FG, PRIMARY_HOVER, SIDEBAR_BG, SURFACE,
+    SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color, color_alpha,
 };
 use crate::engine::profile::StickTuning;
 
@@ -17,17 +17,17 @@ pub fn section_card(title: &'static str) -> Div {
         .flex()
         .flex_col()
         .min_w(px(0.0))
-        .gap_2p5()
-        .p_3()
+        .gap_3()
+        .p_4()
         .bg(color(SURFACE))
         .border_1()
         .border_color(color(BORDER))
-        .rounded_md()
+        .rounded(px(8.0))
         .child(
             div()
-                .text_xs()
+                .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color(TEXT_MUTED))
+                .text_color(color(TEXT))
                 .child(title),
         )
 }
@@ -37,12 +37,12 @@ pub fn section_card_with_action(title: &'static str, action: impl IntoElement) -
         .flex()
         .flex_col()
         .min_w(px(0.0))
-        .gap_2p5()
-        .p_3()
+        .gap_3()
+        .p_4()
         .bg(color(SURFACE))
         .border_1()
         .border_color(color(BORDER))
-        .rounded_md()
+        .rounded(px(8.0))
         .child(
             div()
                 .flex()
@@ -51,9 +51,9 @@ pub fn section_card_with_action(title: &'static str, action: impl IntoElement) -
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
+                        .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color(TEXT_MUTED))
+                        .text_color(color(TEXT))
                         .child(title),
                 )
                 .child(action),
@@ -65,14 +65,14 @@ pub fn pill_button(
     label: impl Into<SharedString>,
     active: bool,
 ) -> Stateful<Div> {
-    let bg = if active { ACCENT } else { SURFACE_ALT };
-    let border = if active { ACCENT } else { BORDER };
-    let text = if active { 0xFFFFFF } else { TEXT };
+    let bg = if active { PRIMARY } else { SURFACE_ALT };
+    let border = if active { PRIMARY } else { BORDER };
+    let text = if active { PRIMARY_FG } else { TEXT };
     div()
         .id(id.into())
         .px_2p5()
         .py_1()
-        .rounded_sm()
+        .rounded_md()
         .border_1()
         .border_color(color(border))
         .bg(color(bg))
@@ -84,9 +84,69 @@ pub fn pill_button(
         .cursor_pointer()
         .hover(move |s| {
             if active {
-                s
+                s.bg(color(PRIMARY_HOVER))
             } else {
                 s.bg(color(SURFACE_HOVER))
+                    .border_color(color(BORDER_STRONG))
+            }
+        })
+        .child(label.into())
+}
+
+pub fn sidebar_item(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let bg = if active { SURFACE_HOVER } else { SIDEBAR_BG };
+    let text = if active { TEXT } else { TEXT_MUTED };
+    div()
+        .id(id.into())
+        .w_full()
+        .px_2p5()
+        .py_1p5()
+        .rounded_md()
+        .bg(color(bg))
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color(text))
+        .cursor_pointer()
+        .hover(move |s| {
+            if active {
+                s
+            } else {
+                s.bg(color(SURFACE_ALT)).text_color(color(TEXT))
+            }
+        })
+        .child(label.into())
+}
+
+pub fn sidebar_profile_item(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let bg = if active { SURFACE_ALT } else { SIDEBAR_BG };
+    let border = if active { BORDER_STRONG } else { SIDEBAR_BG };
+    let text = if active { TEXT } else { TEXT_MUTED };
+    div()
+        .id(id.into())
+        .w_full()
+        .px_2p5()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(color(border))
+        .bg(color(bg))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color(text))
+        .cursor_pointer()
+        .hover(move |s| {
+            if active {
+                s
+            } else {
+                s.bg(color(SURFACE_ALT)).text_color(color(TEXT))
             }
         })
         .child(label.into())
@@ -96,7 +156,7 @@ pub fn coming_soon_pill(label: &'static str) -> Div {
     div()
         .px_2p5()
         .py_1()
-        .rounded_sm()
+        .rounded_md()
         .border_1()
         .border_color(color(BORDER))
         .text_xs()
@@ -114,9 +174,9 @@ pub fn driver_badge(name: &'static str, installed: bool) -> Div {
     };
     let text_color = if installed { TEXT } else { TEXT_MUTED };
     div()
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
+        .px_2p5()
+        .py_1()
+        .rounded_md()
         .bg(color(SURFACE_ALT))
         .border_1()
         .border_color(color(BORDER))
@@ -128,8 +188,8 @@ pub fn driver_badge(name: &'static str, installed: bool) -> Div {
 }
 
 pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
-    let box_px = 116.0f32;
-    let dot_px = 10.0f32;
+    let box_px = 104.0f32;
+    let dot_px = 9.0f32;
     let pad = 6.0f32;
     let span = box_px - dot_px - pad * 2.0;
     let left_px = pad + (x as f32 / 255.0) * span;
@@ -143,6 +203,7 @@ pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
         .child(
             div()
                 .text_xs()
+                .font_family(FONT_MONO)
                 .text_color(color(TEXT_MUTED))
                 .child(format!("{title} ({x}, {y})")),
         )
@@ -153,7 +214,7 @@ pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
                 .bg(color(SURFACE_ALT))
                 .border_1()
                 .border_color(color(BORDER))
-                .rounded_sm()
+                .rounded_md()
                 .child(
                     div()
                         .absolute()
@@ -179,7 +240,7 @@ pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
                         .top(px(top_px))
                         .size(px(dot_px))
                         .rounded_full()
-                        .bg(color(ACCENT)),
+                        .bg(color(PRIMARY)),
                 ),
         )
 }
@@ -200,8 +261,8 @@ pub fn meter_row(label: &'static str, value: u8, bar_color: u32) -> Div {
         .child(
             div()
                 .flex_1()
-                .h(px(8.0))
-                .rounded_sm()
+                .h(px(6.0))
+                .rounded_full()
                 .bg(color(SURFACE_ALT))
                 .border_1()
                 .border_color(color(BORDER))
@@ -210,8 +271,9 @@ pub fn meter_row(label: &'static str, value: u8, bar_color: u32) -> Div {
         )
         .child(
             div()
-                .w(px(30.0))
+                .w(px(32.0))
                 .text_xs()
+                .font_family(FONT_MONO)
                 .text_color(color(TEXT))
                 .child(format!("{value}")),
         )
@@ -221,12 +283,12 @@ pub fn button_pill(label: &'static str, pressed: bool) -> Div {
     div()
         .px_2()
         .py_0p5()
-        .rounded_sm()
+        .rounded_md()
         .border_1()
-        .border_color(color(if pressed { ACCENT } else { BORDER }))
-        .bg(color(if pressed { ACCENT } else { SURFACE_ALT }))
+        .border_color(color(if pressed { PRIMARY } else { BORDER }))
+        .bg(color(if pressed { PRIMARY } else { SURFACE_ALT }))
         .text_xs()
-        .text_color(color(if pressed { 0xFFFFFF } else { TEXT_MUTED }))
+        .text_color(color(if pressed { PRIMARY_FG } else { TEXT_MUTED }))
         .child(label)
 }
 
@@ -326,7 +388,7 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
                 .rounded_full()
                 .border_1()
                 .border_color(color(WARN))
-                .bg(color_alpha(WARN, 0x18)),
+                .bg(color_alpha(WARN, 0x1A)),
         );
     }
 
@@ -341,8 +403,8 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
                 .size(px(d_dz))
                 .rounded_full()
                 .border_1()
-                .border_color(color(ACCENT))
-                .bg(color_alpha(ACCENT, 0x2E)),
+                .border_color(color(BORDER_STRONG))
+                .bg(color_alpha(PRIMARY, 0x22)),
         );
     }
 
@@ -365,9 +427,9 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
                 .top(px(out_top))
                 .size(px(DOT_PX))
                 .rounded_full()
-                .bg(color(ACCENT))
+                .bg(color(PRIMARY))
                 .border_1()
-                .border_color(color(0xFFFFFF)),
+                .border_color(color(PRIMARY_FG)),
         );
 
     let raw_pct = ((((raw[0] as f32 - 128.0) / 127.5).hypot((raw[1] as f32 - 128.0) / 127.5))
@@ -392,7 +454,13 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
         .items_center()
         .gap_1()
         .child(field)
-        .child(div().text_xs().text_color(color(TEXT_MUTED)).child(readout))
+        .child(
+            div()
+                .text_xs()
+                .font_family(FONT_MONO)
+                .text_color(color(TEXT_MUTED))
+                .child(readout),
+        )
         .child(
             div()
                 .text_xs()
@@ -420,9 +488,7 @@ pub fn slider_bar(
                 .w_full()
                 .h(px(6.0))
                 .rounded_full()
-                .bg(color(SURFACE_ALT))
-                .border_1()
-                .border_color(color(BORDER))
+                .bg(color(SURFACE_HOVER))
                 .overflow_hidden()
                 .child(div().h_full().w(relative(clamped)).bg(color(fill_color))),
         )
@@ -439,12 +505,12 @@ pub fn slider_bar(
                     div()
                         .absolute()
                         .left(relative(clamped))
-                        .ml(px(-6.0))
-                        .size(px(12.0))
+                        .ml(px(-7.0))
+                        .size(px(14.0))
                         .rounded_full()
-                        .bg(color(0xFFFFFF))
-                        .border_1()
-                        .border_color(color(fill_color)),
+                        .bg(color(PRIMARY))
+                        .border_2()
+                        .border_color(color(BG)),
                 ),
         )
         .child(
