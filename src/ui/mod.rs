@@ -1,3 +1,4 @@
+mod controller_view;
 pub mod theme;
 mod widgets;
 
@@ -14,14 +15,14 @@ use gpui::{
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow};
 
+use self::controller_view::{ControllerPreviewState, virtual_dualsense};
 use self::theme::{
     BG, BORDER, BORDER_STRONG, DANGER, FONT_MONO, FONT_SANS, PRIMARY, SIDEBAR_BG, SURFACE,
     SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, WARN, color,
 };
 use self::widgets::{
-    button_pill, coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button,
-    section_card, section_card_with_action, setting_row, sidebar_item, sidebar_profile_item,
-    slider_bar, stick_box,
+    coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button, section_card,
+    section_card_with_action, setting_row, sidebar_item, sidebar_profile_item, slider_bar,
 };
 use crate::emu::EmulationMode;
 use crate::engine::profile::{
@@ -31,7 +32,7 @@ use crate::engine::profiles_store::{
     AppConfig, NamedProfile, config_path, load_config, open_config_dir, save_config,
 };
 use crate::engine::{Engine, SeqLock, TelemetrySnapshot};
-use crate::protocol::{BatteryStatus, DPad, DualSenseButtons, Transport};
+use crate::protocol::{BatteryStatus, Transport};
 use crate::startup::{is_run_at_startup_enabled, set_run_at_startup};
 use crate::tray::{SystemTray, TrayAction, TrayState};
 
@@ -845,21 +846,40 @@ impl DsMasterView {
         .child(quick_toggles);
 
         let s = snap.unwrap_or_default();
-        let b = s.buttons;
-        let dpad_up = matches!(s.dpad, DPad::North | DPad::NorthEast | DPad::NorthWest);
-        let dpad_down = matches!(s.dpad, DPad::South | DPad::SouthEast | DPad::SouthWest);
-        let dpad_left = matches!(s.dpad, DPad::West | DPad::NorthWest | DPad::SouthWest);
-        let dpad_right = matches!(s.dpad, DPad::East | DPad::NorthEast | DPad::SouthEast);
+        let lightbar_label = if !profile.override_lightbar {
+            "Default".to_owned()
+        } else {
+            let [r, g, b] = s.active_lightbar_rgb.unwrap_or(profile.lightbar_rgb);
+            if [r, g, b] == [0, 0, 0] {
+                "Off".to_owned()
+            } else {
+                format!("#{r:02X}{g:02X}{b:02X}")
+            }
+        };
 
         let monitor_card = section_card("Live Input Monitor")
             .flex_1()
+            .child(virtual_dualsense(ControllerPreviewState {
+                snap: s,
+                override_lightbar: profile.override_lightbar,
+                lightbar_rgb: profile.lightbar_rgb,
+                player_leds: profile.player_leds,
+            }))
             .child(
                 div()
                     .flex()
-                    .justify_around()
-                    .py_1()
-                    .child(stick_box("Left Stick", s.left_stick[0], s.left_stick[1]))
-                    .child(stick_box("Right Stick", s.right_stick[0], s.right_stick[1])),
+                    .justify_center()
+                    .text_xs()
+                    .font_family(FONT_MONO)
+                    .text_color(color(TEXT_MUTED))
+                    .child(format!(
+                        "LS ({:3}, {:3})   RS ({:3}, {:3})   Lightbar: {}",
+                        s.left_stick[0],
+                        s.left_stick[1],
+                        s.right_stick[0],
+                        s.right_stick[1],
+                        lightbar_label
+                    )),
             )
             .child(
                 div()
@@ -870,39 +890,6 @@ impl DsMasterView {
                     .child(meter_row("R2", s.r2_analog, PRIMARY))
                     .child(meter_row("Rumble L", s.rumble_large, WARN))
                     .child(meter_row("Rumble R", s.rumble_small, WARN)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .pt_1()
-                    .child(button_pill("Up", dpad_up))
-                    .child(button_pill("Down", dpad_down))
-                    .child(button_pill("Left", dpad_left))
-                    .child(button_pill("Right", dpad_right))
-                    .child(button_pill("Cross", b.contains(DualSenseButtons::CROSS)))
-                    .child(button_pill("Circle", b.contains(DualSenseButtons::CIRCLE)))
-                    .child(button_pill("Square", b.contains(DualSenseButtons::SQUARE)))
-                    .child(button_pill(
-                        "Triangle",
-                        b.contains(DualSenseButtons::TRIANGLE),
-                    ))
-                    .child(button_pill("L1", b.contains(DualSenseButtons::L1)))
-                    .child(button_pill("R1", b.contains(DualSenseButtons::R1)))
-                    .child(button_pill("L3", b.contains(DualSenseButtons::L3)))
-                    .child(button_pill("R3", b.contains(DualSenseButtons::R3)))
-                    .child(button_pill("Create", b.contains(DualSenseButtons::CREATE)))
-                    .child(button_pill(
-                        "Options",
-                        b.contains(DualSenseButtons::OPTIONS),
-                    ))
-                    .child(button_pill("PS", b.contains(DualSenseButtons::PS_HOME)))
-                    .child(button_pill(
-                        "Touchpad",
-                        b.contains(DualSenseButtons::TOUCHPAD),
-                    ))
-                    .child(button_pill("Mic", b.contains(DualSenseButtons::MIC_MUTE))),
             );
 
         div()

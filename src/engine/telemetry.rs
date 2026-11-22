@@ -1,4 +1,5 @@
 use crate::emu::EmulationMode;
+use crate::protocol::input::TouchPoint;
 use crate::protocol::{BatteryStatus, DPad, DualSenseButtons, Transport};
 
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +24,8 @@ pub struct TelemetrySnapshot {
     pub packet_count: u64,
     pub rumble_large: u8,
     pub rumble_small: u8,
+    pub touch: [TouchPoint; 2],
+    pub active_lightbar_rgb: Option<[u8; 3]>,
 }
 
 impl Default for TelemetrySnapshot {
@@ -48,6 +51,8 @@ impl Default for TelemetrySnapshot {
             packet_count: 0,
             rumble_large: 0,
             rumble_small: 0,
+            touch: [TouchPoint::default(); 2],
+            active_lightbar_rgb: None,
         }
     }
 }

@@ -393,6 +393,12 @@ fn session_loop(
             packet_count,
             rumble_large,
             rumble_small,
+            touch: processed.touch,
+            active_lightbar_rgb: if last_override_lightbar {
+                ds4_rgb
+            } else {
+                None
+            },
         });
     }
 
