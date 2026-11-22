@@ -196,17 +196,13 @@ pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
     let top_px = pad + (y as f32 / 255.0) * span;
 
     div()
+        .w(px(124.0))
         .flex()
         .flex_col()
+        .flex_shrink_0()
         .gap_1p5()
         .items_center()
-        .child(
-            div()
-                .text_xs()
-                .font_family(FONT_MONO)
-                .text_color(color(TEXT_MUTED))
-                .child(format!("{title} ({x}, {y})")),
-        )
+        .child(div().text_xs().text_color(color(TEXT_MUTED)).child(title))
         .child(
             div()
                 .relative()
@@ -242,6 +238,14 @@ pub fn stick_box(title: &'static str, x: u8, y: u8) -> Div {
                         .rounded_full()
                         .bg(color(PRIMARY)),
                 ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_family(FONT_MONO)
+                .whitespace_nowrap()
+                .text_color(color(TEXT_MUTED))
+                .child(format!("{x:3}, {y:3}")),
         )
 }
 
@@ -442,12 +446,13 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
         .round() as u32;
 
     let readout = if connected {
-        format!("In {raw_pct}% -> Out {out_pct}%")
+        format!("In {raw_pct:3}% / Out {out_pct:3}%")
     } else {
         "Move stick to test".to_owned()
     };
 
     div()
+        .w(px(140.0))
         .flex()
         .flex_col()
         .flex_shrink_0()
@@ -458,6 +463,7 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
             div()
                 .text_xs()
                 .font_family(FONT_MONO)
+                .whitespace_nowrap()
                 .text_color(color(TEXT_MUTED))
                 .child(readout),
         )
