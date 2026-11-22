@@ -112,7 +112,8 @@ unsafe extern "system" fn pnp_callback(
         std::slice::from_raw_parts(base_ptr.add(sym_offset) as *const u16, sym_bytes / 2)
     };
     let path = wide_to_string(sym_u16);
-    if !path.to_ascii_lowercase().contains("vid_054c") {
+    let lower = path.to_ascii_lowercase();
+    if !lower.contains("vid_054c") && !lower.contains("vid&0002054c") {
         return 0;
     }
 

@@ -78,15 +78,19 @@ pub struct DualSenseDevice {
     cancel_event: Arc<OwnedEvent>,
     read_ov: Box<OVERLAPPED>,
     write_ov: Box<OVERLAPPED>,
-    read_buf: Box<[u8; 128]>,
-    write_buf: Box<[u8; 128]>,
+    read_buf: Box<[u8]>,
+    write_buf: Box<[u8]>,
 }
 
 unsafe impl Send for DualSenseDevice {}
 
 impl DualSenseDevice {
     pub fn open(info: DeviceInfo) -> Result<Self, HidError> {
-        if info.input_report_len > 128 || info.output_report_len > 128 {
+        if info.input_report_len == 0
+            || info.output_report_len == 0
+            || info.input_report_len > 4096
+            || info.output_report_len > 4096
+        {
             return Err(HidError::ReportSizeOutOfBounds {
                 input: info.input_report_len,
                 output: info.output_report_len,
@@ -110,6 +114,8 @@ impl DualSenseDevice {
         let read_event = OwnedEvent::new_manual_reset()?;
         let write_event = OwnedEvent::new_manual_reset()?;
         let cancel_event = Arc::new(OwnedEvent::new_manual_reset()?);
+        let read_buf = vec![0u8; info.input_report_len].into_boxed_slice();
+        let write_buf = vec![0u8; info.output_report_len].into_boxed_slice();
 
         Ok(Self {
             info,
@@ -119,8 +125,8 @@ impl DualSenseDevice {
             cancel_event,
             read_ov: Box::new(OVERLAPPED::default()),
             write_ov: Box::new(OVERLAPPED::default()),
-            read_buf: Box::new([0u8; 128]),
-            write_buf: Box::new([0u8; 128]),
+            read_buf,
+            write_buf,
         })
     }
 
@@ -139,8 +145,7 @@ impl DualSenseDevice {
     /// Mutable access to the pre-allocated output report buffer of `output_report_len` bytes.
     #[inline]
     pub fn write_buf_mut(&mut self) -> &mut [u8] {
-        let len = self.info.output_report_len;
-        &mut self.write_buf[..len]
+        &mut self.write_buf
     }
 
     /// Queries Feature Report `0x05` (calibration), which also activates full `0x31` Bluetooth reporting.
@@ -180,11 +185,10 @@ impl DualSenseDevice {
         };
 
         let mut bytes_read = 0u32;
-        let target_len = self.info.input_report_len;
         let res = unsafe {
             ReadFile(
                 self.handle,
-                Some(&mut self.read_buf[..target_len]),
+                Some(&mut self.read_buf[..]),
                 Some(&mut bytes_read),
                 Some(&mut *self.read_ov),
             )
@@ -250,12 +254,11 @@ impl DualSenseDevice {
             ..Default::default()
         };
 
-        let target_len = self.info.output_report_len;
         let mut bytes_written = 0u32;
         let res = unsafe {
             WriteFile(
                 self.handle,
-                Some(&self.write_buf[..target_len]),
+                Some(&self.write_buf[..]),
                 Some(&mut bytes_written),
                 Some(&mut *self.write_ov),
             )

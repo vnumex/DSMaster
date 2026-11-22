@@ -116,15 +116,15 @@ pub fn encode_output_report(
                     actual: out.len(),
                 });
             }
+            out.fill(0);
             let buf = &mut out[..DS_OUTPUT_REPORT_BT_SIZE];
-            buf.fill(0);
             buf[0] = DS_OUTPUT_REPORT_BT;
             buf[1] = (bt_seq & 0x0F) << 4;
             buf[2] = DS_OUTPUT_TAG;
             write_common_payload(state, &mut buf[3..50]);
             let crc = crc32_with_seed(PS_OUTPUT_CRC32_SEED, &buf[0..74]);
             buf[74..78].copy_from_slice(&crc.to_le_bytes());
-            Ok(DS_OUTPUT_REPORT_BT_SIZE)
+            Ok(out.len())
         }
     }
 }
@@ -173,5 +173,13 @@ mod tests {
         assert_eq!(bt[47..50], [10, 20, 30]);
         let expected_crc = crc32_with_seed(PS_OUTPUT_CRC32_SEED, &bt[0..74]);
         assert_eq!(bt[74..78], expected_crc.to_le_bytes());
+
+        // Windows Bluetooth HID requires 547-byte padded buffers with trailing bytes zeroed.
+        let mut bt_547 = [0xFFu8; 547];
+        let bt_547_len =
+            encode_output_report(&state, Transport::Bluetooth, 3, &mut bt_547).unwrap();
+        assert_eq!(bt_547_len, 547);
+        assert_eq!(&bt_547[..78], &bt[..]);
+        assert!(bt_547[78..].iter().all(|&b| b == 0));
     }
 }

@@ -119,6 +119,7 @@ fn session_loop(
         Ok(None) => warn!(path = %info.device_path, "Calibration report invalid; using fallback"),
         Err(e) => warn!(path = %info.device_path, error = %e, "Failed to query calibration 0x05"),
     }
+    let mut last_bt_activate = Instant::now();
 
     let mut active_mode = EmulationMode::None;
     let mut target: Option<Box<dyn VirtualController>> = None;
@@ -187,7 +188,10 @@ fn session_loop(
                 let parsed = match parse_input_report(bytes, info.transport, info.is_edge) {
                     Ok(p) => p,
                     Err(ProtocolError::MinimalBluetoothReport) => {
-                        let _ = device.read_feature_calibration();
+                        if last_bt_activate.elapsed() >= Duration::from_millis(500) {
+                            let _ = device.read_feature_calibration();
+                            last_bt_activate = Instant::now();
+                        }
                         continue;
                     }
                     Err(_) => continue,
