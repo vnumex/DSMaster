@@ -16,7 +16,8 @@ pub fn section_card(title: &'static str) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap_3()
+        .min_w(px(0.0))
+        .gap_2p5()
         .p_3()
         .bg(color(SURFACE))
         .border_1()
@@ -31,6 +32,34 @@ pub fn section_card(title: &'static str) -> Div {
         )
 }
 
+pub fn section_card_with_action(title: &'static str, action: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.0))
+        .gap_2p5()
+        .p_3()
+        .bg(color(SURFACE))
+        .border_1()
+        .border_color(color(BORDER))
+        .rounded_md()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color(TEXT_MUTED))
+                        .child(title),
+                )
+                .child(action),
+        )
+}
+
 pub fn pill_button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -41,7 +70,7 @@ pub fn pill_button(
     let text = if active { 0xFFFFFF } else { TEXT };
     div()
         .id(id.into())
-        .px_3()
+        .px_2p5()
         .py_1()
         .rounded_sm()
         .border_1()
@@ -49,6 +78,8 @@ pub fn pill_button(
         .bg(color(bg))
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .flex_shrink_0()
         .text_color(color(text))
         .cursor_pointer()
         .hover(move |s| {
@@ -69,13 +100,19 @@ pub fn coming_soon_pill(label: &'static str) -> Div {
         .border_1()
         .border_color(color(BORDER))
         .text_xs()
+        .whitespace_nowrap()
+        .flex_shrink_0()
         .text_color(color(TEXT_MUTED))
         .child(label)
 }
 
-pub fn driver_badge(name: &'static str, ready: bool) -> Div {
-    let status = if ready { "Ready" } else { "Missing" };
-    let text_color = if ready { TEXT } else { TEXT_MUTED };
+pub fn driver_badge(name: &'static str, installed: bool) -> Div {
+    let status = if installed {
+        "Installed"
+    } else {
+        "Not Installed"
+    };
+    let text_color = if installed { TEXT } else { TEXT_MUTED };
     div()
         .px_2()
         .py_0p5()
@@ -84,6 +121,8 @@ pub fn driver_badge(name: &'static str, ready: bool) -> Div {
         .border_1()
         .border_color(color(BORDER))
         .text_xs()
+        .whitespace_nowrap()
+        .flex_shrink_0()
         .text_color(color(text_color))
         .child(format!("{name}: {status}"))
 }
@@ -206,6 +245,8 @@ pub fn setting_row(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
                 .gap_0p5()
                 .child(
                     div()
@@ -221,7 +262,7 @@ pub fn setting_row(
                         .child(description),
                 ),
         )
-        .child(control)
+        .child(div().flex_shrink_0().child(control))
 }
 
 fn stick_point_in_circle(x: u8, y: u8, field_px: f32, dot_px: f32) -> (f32, f32) {
@@ -240,7 +281,7 @@ fn stick_point_in_circle(x: u8, y: u8, field_px: f32, dot_px: f32) -> (f32, f32)
 }
 
 pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connected: bool) -> Div {
-    const FIELD_PX: f32 = 120.0;
+    const FIELD_PX: f32 = 108.0;
     const DOT_PX: f32 = 8.0;
 
     let (raw_left, raw_top) = stick_point_in_circle(raw[0], raw[1], FIELD_PX, DOT_PX);
@@ -347,6 +388,7 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
     div()
         .flex()
         .flex_col()
+        .flex_shrink_0()
         .items_center()
         .gap_1()
         .child(field)

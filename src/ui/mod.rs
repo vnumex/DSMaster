@@ -19,7 +19,7 @@ use self::theme::{
 };
 use self::widgets::{
     button_pill, coming_soon_pill, deadzone_showcase, driver_badge, meter_row, pill_button,
-    section_card, setting_row, slider_bar, stick_box,
+    section_card, section_card_with_action, setting_row, slider_bar, stick_box,
 };
 use crate::emu::EmulationMode;
 use crate::engine::profile::{
@@ -535,8 +535,9 @@ impl DsMasterView {
 
             let right = div()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .gap_4()
+                .gap_3()
                 .text_xs()
                 .text_color(color(TEXT_MUTED))
                 .child(format!("Battery: {bat_label}"))
@@ -549,8 +550,10 @@ impl DsMasterView {
 
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
+                .gap_2()
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -625,40 +628,9 @@ impl DsMasterView {
                 .child(coming_soon_pill("Virtual DualSense (Coming Soon)")),
         );
 
-        let trig_mode_row = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .child(
-                div()
-                    .w(px(36.0))
-                    .text_xs()
-                    .text_color(color(TEXT_MUTED))
-                    .child("Mode"),
-            )
-            .child(
-                pill_button(
-                    "trig-untouched",
-                    "Default (Untouched)",
-                    !profile.override_triggers,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.config.active_settings_mut().override_triggers = false;
-                    this.commit_config(cx);
-                })),
-            )
-            .child(
-                pill_button("trig-custom", "Custom", profile.override_triggers).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.config.active_settings_mut().override_triggers = true;
-                        this.commit_config(cx);
-                    }),
-                ),
-            );
-
-        let mut l2_row = div().flex().items_center().gap_1p5().child(
+        let mut l2_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
-                .w(px(36.0))
+                .w(px(28.0))
                 .text_xs()
                 .text_color(color(TEXT_MUTED))
                 .child("L2"),
@@ -680,9 +652,9 @@ impl DsMasterView {
             );
         }
 
-        let mut r2_row = div().flex().items_center().gap_1p5().child(
+        let mut r2_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
-                .w(px(36.0))
+                .w(px(28.0))
                 .text_xs()
                 .text_color(color(TEXT_MUTED))
                 .child("R2"),
@@ -704,22 +676,22 @@ impl DsMasterView {
             );
         }
 
-        let triggers_card = section_card("ADAPTIVE TRIGGERS")
-            .child(trig_mode_row)
-            .child(l2_row)
-            .child(r2_row);
-
-        let mut swatch_row = div().flex().flex_wrap().gap_1p5().child(
+        let triggers_card = section_card_with_action(
+            "ADAPTIVE TRIGGERS",
             pill_button(
-                "rgb-untouched",
+                "trig-untouched",
                 "Default (Untouched)",
-                !profile.override_lightbar,
+                !profile.override_triggers,
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.config.active_settings_mut().override_lightbar = false;
+                this.config.active_settings_mut().override_triggers = false;
                 this.commit_config(cx);
             })),
-        );
+        )
+        .child(l2_row)
+        .child(r2_row);
+
+        let mut swatch_row = div().flex().flex_wrap().gap_1p5();
         for (name, rgb_val) in RGB_SWATCHES {
             let active = profile.override_lightbar && profile.lightbar_rgb == rgb_val;
             let hex =
@@ -756,7 +728,7 @@ impl DsMasterView {
             );
         }
 
-        let mut player_row = div().flex().items_center().gap_1p5().child(
+        let mut player_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
                 .w(px(76.0))
                 .text_xs()
@@ -832,10 +804,21 @@ impl DsMasterView {
                 })),
             );
 
-        let hardware_card = section_card("LIGHTBAR, LEDS & QUICK TOGGLES")
-            .child(swatch_row)
-            .child(player_row)
-            .child(quick_toggles);
+        let hardware_card = section_card_with_action(
+            "LIGHTBAR, LEDS & QUICK TOGGLES",
+            pill_button(
+                "rgb-untouched",
+                "Default (Untouched)",
+                !profile.override_lightbar,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.config.active_settings_mut().override_lightbar = false;
+                this.commit_config(cx);
+            })),
+        )
+        .child(swatch_row)
+        .child(player_row)
+        .child(quick_toggles);
 
         let s = snap.unwrap_or_default();
         let b = s.buttons;
@@ -902,7 +885,7 @@ impl DsMasterView {
             .flex()
             .flex_col()
             .flex_1()
-            .gap_3()
+            .gap_2p5()
             .child(controller_strip)
             .child(
                 div()
@@ -913,8 +896,9 @@ impl DsMasterView {
                         div()
                             .flex()
                             .flex_col()
-                            .w(px(450.0))
-                            .gap_3()
+                            .w(px(420.0))
+                            .flex_shrink_0()
+                            .gap_2p5()
                             .child(emu_card)
                             .child(triggers_card)
                             .child(hardware_card),
@@ -1003,6 +987,7 @@ impl DsMasterView {
                         .flex()
                         .flex_col()
                         .flex_1()
+                        .min_w(px(0.0))
                         .gap_2()
                         .child(dz_row)
                         .child(adz_row)
@@ -1047,7 +1032,7 @@ impl DsMasterView {
             cx,
         );
 
-        let mut hair_row = div().flex().items_center().gap_1p5().child(
+        let mut hair_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
                 .w(px(96.0))
                 .text_xs()
@@ -1066,7 +1051,7 @@ impl DsMasterView {
             );
         }
 
-        let mut remap_row = div().flex().items_center().gap_1p5().child(
+        let mut remap_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
                 .w(px(96.0))
                 .text_xs()
@@ -1095,6 +1080,7 @@ impl DsMasterView {
 
         let mut tp_row = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1p5()
             .child(
@@ -1132,7 +1118,7 @@ impl DsMasterView {
             );
         }
 
-        let mut gyro_mode_row = div().flex().items_center().gap_1p5().child(
+        let mut gyro_mode_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
                 .w(px(110.0))
                 .text_xs()
@@ -1154,7 +1140,7 @@ impl DsMasterView {
             );
         }
 
-        let mut gyro_sens_row = div().flex().items_center().gap_1p5().child(
+        let mut gyro_sens_row = div().flex().flex_wrap().items_center().gap_1p5().child(
             div()
                 .w(px(110.0))
                 .text_xs()
@@ -1262,8 +1248,10 @@ impl DsMasterView {
 
             let mut row = div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
+                .gap_2()
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -1454,6 +1442,7 @@ impl DsMasterView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .pt_1()
@@ -1522,45 +1511,37 @@ impl DsMasterView {
                 ))
                 .child(setting_row(
                     "Adaptive Triggers",
-                    "Leave trigger actuators untouched or apply profile presets",
-                    div()
-                        .flex()
-                        .gap_1()
-                        .child(
-                            pill_button("set-trig-def", "Default", !profile.override_triggers)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.config.active_settings_mut().override_triggers = false;
-                                    this.commit_config(cx);
-                                })),
-                        )
-                        .child(
-                            pill_button("set-trig-cust", "Custom", profile.override_triggers)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.config.active_settings_mut().override_triggers = true;
-                                    this.commit_config(cx);
-                                })),
-                        ),
+                    "Leave trigger actuators untouched or reset active preset",
+                    pill_button(
+                        "set-trig-def",
+                        if !profile.override_triggers {
+                            "Default (Untouched)"
+                        } else {
+                            "Reset to Default"
+                        },
+                        !profile.override_triggers,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config.active_settings_mut().override_triggers = false;
+                        this.commit_config(cx);
+                    })),
                 ))
                 .child(setting_row(
                     "Lightbar & LEDs",
-                    "Leave lightbar and player LEDs untouched or override them",
-                    div()
-                        .flex()
-                        .gap_1()
-                        .child(
-                            pill_button("set-lb-def", "Default", !profile.override_lightbar)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.config.active_settings_mut().override_lightbar = false;
-                                    this.commit_config(cx);
-                                })),
-                        )
-                        .child(
-                            pill_button("set-lb-cust", "Custom", profile.override_lightbar)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.config.active_settings_mut().override_lightbar = true;
-                                    this.commit_config(cx);
-                                })),
-                        ),
+                    "Leave lightbar and player LEDs untouched or reset override",
+                    pill_button(
+                        "set-lb-def",
+                        if !profile.override_lightbar {
+                            "Default (Untouched)"
+                        } else {
+                            "Reset to Default"
+                        },
+                        !profile.override_lightbar,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.config.active_settings_mut().override_lightbar = false;
+                        this.commit_config(cx);
+                    })),
                 ))
                 .child(setting_row(
                     "Active Profile",
@@ -1604,9 +1585,8 @@ impl DsMasterView {
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
+                    .flex_col()
+                    .gap_2()
                     .child(
                         div()
                             .text_xs()
@@ -1616,6 +1596,7 @@ impl DsMasterView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_2()
                             .child(
@@ -1703,7 +1684,7 @@ impl Render for DsMasterView {
             .map(Engine::is_cloak_enabled)
             .unwrap_or(self.config.cloak_physical);
 
-        let mut profile_switcher = div().flex().items_center().gap_1();
+        let mut profile_switcher = div().flex().flex_wrap().items_center().gap_1();
         for (idx, p) in self.config.profiles.iter().take(4).enumerate() {
             let active = p.name == self.config.active_profile;
             let name = p.name.clone();
@@ -1744,22 +1725,14 @@ impl Render for DsMasterView {
                     .child(profile_switcher),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        pill_button(
-                            "cloak-toggle",
-                            if cloak_on { "Cloak: On" } else { "Cloak: Off" },
-                            cloak_on,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_cloak(cx);
-                        })),
-                    )
-                    .child(driver_badge("ViGEmBus", self.vigem_available))
-                    .child(driver_badge("HidHide", self.hidhide_available)),
+                pill_button(
+                    "cloak-toggle",
+                    if cloak_on { "Cloak: On" } else { "Cloak: Off" },
+                    cloak_on,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_cloak(cx);
+                })),
             );
 
         let nav_bar = div()
@@ -1853,6 +1826,16 @@ impl Render for DsMasterView {
             )
             .child(header)
             .child(nav_bar)
-            .child(div().flex().flex_col().flex_1().p_4().child(body))
+            .child(
+                div()
+                    .id("main-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .p_4()
+                    .child(body),
+            )
     }
 }
