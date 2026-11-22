@@ -1,4 +1,4 @@
-use gpui::{Div, FontWeight, SharedString, Stateful, div, prelude::*, px, relative};
+use gpui::{Div, FontWeight, IntoElement, SharedString, Stateful, div, prelude::*, px, relative};
 
 use super::theme::{ACCENT, BORDER, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, color};
 
@@ -179,4 +179,37 @@ pub fn button_pill(label: &'static str, pressed: bool) -> Div {
         .text_xs()
         .text_color(color(if pressed { 0xFFFFFF } else { TEXT_MUTED }))
         .child(label)
+}
+
+pub fn setting_row(
+    title: &'static str,
+    description: &'static str,
+    control: impl IntoElement,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .py_1()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color(TEXT))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(TEXT_MUTED))
+                        .child(description),
+                ),
+        )
+        .child(control)
 }

@@ -1,62 +1,49 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod cloak;
 mod emu;
 mod engine;
 mod hid;
 mod protocol;
+mod startup;
+mod tray;
 mod ui;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
     App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size,
 };
-use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-use windows::core::w;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use crate::cloak::HidHideManager;
 use crate::emu::vigem::is_vigem_installed;
-use crate::engine::{ControllerProfile, Engine};
-use crate::ui::DsMasterView;
-
-fn is_hidhide_available() -> bool {
-    let handle = unsafe {
-        CreateFileW(
-            w!(r"\\.\HidHide"),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    };
-    match handle {
-        Ok(h) if h != INVALID_HANDLE_VALUE && !h.is_invalid() => {
-            unsafe {
-                let _ = CloseHandle(h);
-            }
-            true
-        }
-        _ => false,
-    }
-}
+use crate::engine::Engine;
+use crate::engine::profiles_store::load_config;
+use crate::ui::{DsMasterView, WindowControlState};
 
 fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
+    let Some(_instance_guard) = tray::acquire_single_instance() else {
+        return;
+    };
+
     let vigem_available = is_vigem_installed();
-    let hidhide_available = is_hidhide_available();
-    let initial_profile = ControllerProfile::default();
-    let mut engine_opt = Some(Engine::start(initial_profile).map_err(|e| e.to_string()));
+    let hidhide_available = HidHideManager::is_available();
+    let initial_config = load_config();
+    let start_hidden = initial_config.work_in_background && initial_config.start_minimized;
+    let mut engine_opt = Some(Engine::start(initial_config.clone()).map_err(|e| e.to_string()));
 
     Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(920.0), px(620.0)), cx);
+        let bounds = Bounds::centered(None, size(px(960.0), px(660.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(800.0), px(560.0))),
+            window_min_size: Some(size(px(840.0), px(580.0))),
+            show: !start_hidden,
             titlebar: Some(TitlebarOptions {
                 title: Some("DSMaster".into()),
                 ..Default::default()
@@ -68,17 +55,53 @@ fn main() {
             .take()
             .unwrap_or_else(|| Err("Engine already initialized".to_owned()));
 
-        let _ = cx.open_window(options, move |_, cx| {
-            cx.new(|cx| {
+        let _ = cx.open_window(options, move |window, cx| {
+            let raw_hwnd = HasWindowHandle::window_handle(window)
+                .ok()
+                .and_then(|h| match h.as_raw() {
+                    RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+
+            let ctl = WindowControlState {
+                raw_hwnd,
+                work_in_background: Arc::new(AtomicBool::new(initial_config.work_in_background)),
+                window_hidden: Arc::new(AtomicBool::new(start_hidden)),
+                force_quit: Arc::new(AtomicBool::new(false)),
+            };
+            let ctl_for_close = ctl.clone();
+
+            let view = cx.new(|cx| {
                 DsMasterView::new(
                     engine_res,
                     vigem_available,
                     hidhide_available,
-                    initial_profile,
+                    initial_config,
+                    ctl,
+                    window,
                     cx,
                 )
-            })
+            });
+
+            let view_for_close = view.clone();
+            window.on_window_should_close(cx, move |_window, cx| {
+                let bg = ctl_for_close.work_in_background.load(Ordering::Acquire);
+                let quitting = ctl_for_close.force_quit.load(Ordering::Acquire);
+                if bg && !quitting {
+                    view_for_close.update(cx, |v, cx| v.hide_to_tray(cx));
+                    false
+                } else {
+                    view_for_close.update(cx, |v, _| v.shutdown_all());
+                    true
+                }
+            });
+
+            view
         });
-        cx.activate(true);
+
+        if !start_hidden {
+            cx.activate(true);
+        }
     });
 }

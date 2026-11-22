@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::{self, JoinHandle};
 
-use crate::protocol::RawInputState;
 use windows::Win32::Foundation::{ERROR_IO_PENDING, GetLastError, WAIT_OBJECT_0};
 use windows::Win32::System::IO::{CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::WaitForMultipleObjects;
@@ -14,8 +13,9 @@ use super::ioctl::{
     VigemUnplugTarget, VigemWaitDeviceReady, XusbReport, XusbRequestNotification, XusbSubmitReport,
 };
 use super::{OwnedEvent, VigemBusHandle, VigemClient};
-use crate::emu::mapping::map_dualsense_to_xusb;
+use crate::emu::mapping::map_to_xusb;
 use crate::emu::{EmuError, FeedbackState, VirtualController};
+use crate::engine::processing::ProcessedInput;
 
 pub struct Xbox360Target {
     bus: Arc<VigemBusHandle>,
@@ -127,8 +127,8 @@ impl Xbox360Target {
 
 impl VirtualController for Xbox360Target {
     #[inline]
-    fn submit(&mut self, input: &RawInputState) -> Result<(), EmuError> {
-        let report = map_dualsense_to_xusb(input);
+    fn submit(&mut self, input: &ProcessedInput) -> Result<(), EmuError> {
+        let report = map_to_xusb(input);
         self.submit_raw(report)
     }
 
@@ -141,7 +141,7 @@ impl VirtualController for Xbox360Target {
         Some(FeedbackState {
             large_motor: (packed & 0xFF) as u8,
             small_motor: ((packed >> 8) & 0xFF) as u8,
-            led_number: ((packed >> 16) & 0xFF) as u8,
+            lightbar_rgb: None,
         })
     }
 }

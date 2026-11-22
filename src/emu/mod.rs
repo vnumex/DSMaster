@@ -1,21 +1,24 @@
 pub mod mapping;
 pub mod vigem;
 
-use crate::protocol::RawInputState;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+use crate::engine::processing::ProcessedInput;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EmulationMode {
     None,
     #[default]
     Xbox360,
+    DualShock4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FeedbackState {
     pub large_motor: u8,
     pub small_motor: u8,
-    pub led_number: u8,
+    pub lightbar_rgb: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Error)]
@@ -33,6 +36,6 @@ pub enum EmuError {
 }
 
 pub trait VirtualController: Send {
-    fn submit(&mut self, input: &RawInputState) -> Result<(), EmuError>;
+    fn submit(&mut self, input: &ProcessedInput) -> Result<(), EmuError>;
     fn poll_feedback(&mut self) -> Option<FeedbackState>;
 }

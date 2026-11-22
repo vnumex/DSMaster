@@ -11,7 +11,6 @@ pub struct AxisCalibration {
 }
 
 impl AxisCalibration {
-    #[cfg(test)]
     #[inline]
     pub const fn apply(&self, raw: i16) -> i32 {
         let centered = (raw as i64) - (self.bias as i64);

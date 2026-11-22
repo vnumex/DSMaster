@@ -27,6 +27,7 @@ use self::ioctl::{
 };
 use crate::emu::EmuError;
 
+pub mod ds4;
 pub mod ioctl;
 pub mod x360;
 

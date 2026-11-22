@@ -3,14 +3,15 @@ use std::os::windows::ffi::OsStringExt;
 use std::ptr;
 
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
-    SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-    SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    CM_Get_Device_Interface_PropertyW, CR_SUCCESS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList,
+    SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
 };
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HIDD_ATTRIBUTES, HIDP_CAPS, HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid,
     HidD_GetPreparsedData, HidP_GetCaps, PHIDP_PREPARSED_DATA,
 };
+use windows::Win32::Devices::Properties::{DEVPKEY_Device_InstanceId, DEVPROPTYPE};
 use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_ITEMS, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -26,6 +27,7 @@ const USAGE_GAMEPAD: u16 = 0x05;
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub device_path: String,
+    pub instance_id: String,
     pub product_id: u16,
     pub is_edge: bool,
     pub transport: Transport,
@@ -70,6 +72,43 @@ pub(crate) fn wide_to_string(buf: &[u16]) -> String {
 
 pub(crate) fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn query_instance_id(path_w: &[u16]) -> String {
+    let mut prop_type = DEVPROPTYPE::default();
+    let mut needed = 0u32;
+    let cr = unsafe {
+        CM_Get_Device_Interface_PropertyW(
+            PCWSTR(path_w.as_ptr()),
+            &DEVPKEY_Device_InstanceId,
+            &mut prop_type,
+            None,
+            &mut needed,
+            0,
+        )
+    };
+    if needed == 0 && cr != CR_SUCCESS {
+        return String::new();
+    }
+    let mut buf = vec![0u8; needed as usize];
+    let cr = unsafe {
+        CM_Get_Device_Interface_PropertyW(
+            PCWSTR(path_w.as_ptr()),
+            &DEVPKEY_Device_InstanceId,
+            &mut prop_type,
+            Some(buf.as_mut_ptr()),
+            &mut needed,
+            0,
+        )
+    };
+    if cr != CR_SUCCESS {
+        return String::new();
+    }
+    let mut wide = Vec::with_capacity(buf.len() / 2);
+    for chunk in buf.chunks_exact(2) {
+        wide.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    wide_to_string(&wide)
 }
 
 /// Inspects a single HID interface path and returns `Some(DeviceInfo)` if it is a DualSense gamepad.
@@ -127,6 +166,7 @@ pub fn inspect_hid_path(device_path: &str) -> Option<DeviceInfo> {
 
     Some(DeviceInfo {
         device_path: device_path.to_owned(),
+        instance_id: query_instance_id(&path_w),
         product_id: attrs.ProductID,
         is_edge: attrs.ProductID == DUALSENSE_EDGE_PID,
         transport,

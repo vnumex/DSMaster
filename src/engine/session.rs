@@ -3,15 +3,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::emu::EmulationMode;
-use crate::emu::VirtualController;
-use crate::emu::vigem::VigemClient;
-use crate::emu::vigem::x360::Xbox360Target;
-use crate::hid::{CancelHandle, DualSenseDevice, ReadOutcome};
-use crate::protocol::{
-    AdaptiveTriggerEffect, OutputState, ProtocolError, Transport, encode_output_report,
-    parse_input_report,
-};
 use arc_swap::ArcSwap;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::HANDLE;
@@ -20,9 +11,20 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::w;
 
+use super::mouse::MouseInjector;
+use super::processing::process_input;
 use super::profile::ControllerProfile;
 use super::seqlock::SeqLock;
 use super::telemetry::TelemetrySnapshot;
+use crate::emu::vigem::VigemClient;
+use crate::emu::vigem::ds4::DualShock4Target;
+use crate::emu::vigem::x360::Xbox360Target;
+use crate::emu::{EmulationMode, VirtualController};
+use crate::hid::{CancelHandle, DualSenseDevice, ReadOutcome};
+use crate::protocol::{
+    AdaptiveTriggerEffect, ImuCalibration, OutputState, ProtocolError, Transport,
+    encode_output_report, parse_input_report,
+};
 
 struct MmcssGuard(HANDLE);
 impl MmcssGuard {
@@ -42,6 +44,7 @@ impl Drop for MmcssGuard {
 }
 
 pub struct ControllerSessionHandle {
+    pub instance_id: String,
     pub telemetry: Arc<SeqLock<TelemetrySnapshot>>,
     stop_flag: Arc<AtomicBool>,
     cancel_handle: CancelHandle,
@@ -74,6 +77,7 @@ impl ControllerSessionHandle {
             .spawn(move || session_loop(device, vigem, profile, tel_c, stop_c, topology_version))?;
 
         Ok(Self {
+            instance_id: info.instance_id,
             telemetry,
             stop_flag,
             cancel_handle,
@@ -113,12 +117,20 @@ fn session_loop(
     let _mmcss = MmcssGuard::enter_games();
     let info = device.info().clone();
 
-    // Activate BT 0x31 full mode and fetch IMU calibration.
-    match device.read_feature_calibration() {
-        Ok(Some(_cal)) => debug!(path = %info.device_path, "Loaded DualSense calibration"),
-        Ok(None) => warn!(path = %info.device_path, "Calibration report invalid; using fallback"),
-        Err(e) => warn!(path = %info.device_path, error = %e, "Failed to query calibration 0x05"),
-    }
+    let calibration = match device.read_feature_calibration() {
+        Ok(Some(cal)) => {
+            debug!(path = %info.device_path, "Loaded DualSense calibration");
+            cal
+        }
+        Ok(None) => {
+            warn!(path = %info.device_path, "Calibration report invalid; using fallback");
+            ImuCalibration::default()
+        }
+        Err(e) => {
+            warn!(path = %info.device_path, error = %e, "Failed to query calibration 0x05");
+            ImuCalibration::default()
+        }
+    };
     let mut last_bt_activate = Instant::now();
 
     let mut active_mode = EmulationMode::None;
@@ -131,15 +143,16 @@ fn session_loop(
         &mut target,
     );
 
+    let mut mouse = MouseInjector::default();
     let mut bt_seq: u8 = 0;
     let mut last_rgb = initial_prof.lightbar_rgb;
+    let mut ds4_rgb: Option<[u8; 3]> = None;
     let mut last_leds = initial_prof.player_leds;
-    let mut last_left_trigger = initial_prof.left_trigger;
-    let mut last_right_trigger = initial_prof.right_trigger;
+    let mut last_left_trigger = initial_prof.left_trigger_preset.effect();
+    let mut last_right_trigger = initial_prof.right_trigger_preset.effect();
     let mut rumble_large: u8 = 0;
     let mut rumble_small: u8 = 0;
 
-    // Send initial LED & adaptive trigger configuration.
     flush_output(
         &mut device,
         &OutputState {
@@ -164,7 +177,7 @@ fn session_loop(
     let mut proc_us_ema = 0.0f32;
     let mut proc_us_max = 0u32;
     let mut packet_count = 0u64;
-    let bt_min_interval = Duration::from_millis(8); // ~125 Hz cap for BT output reports
+    let bt_min_interval = Duration::from_millis(8);
 
     info!(
         transport = ?info.transport,
@@ -182,10 +195,10 @@ fn session_loop(
             }
         };
 
-        let raw = match outcome {
+        let processed = match outcome {
             ReadOutcome::Report(bytes) => {
                 let t0 = Instant::now();
-                let parsed = match parse_input_report(bytes, info.transport, info.is_edge) {
+                let raw = match parse_input_report(bytes, info.transport, info.is_edge) {
                     Ok(p) => p,
                     Err(ProtocolError::MinimalBluetoothReport) => {
                         if last_bt_activate.elapsed() >= Duration::from_millis(500) {
@@ -198,12 +211,16 @@ fn session_loop(
                 };
 
                 let prof = profile_swap.load();
+                let proc_in = process_input(&raw, &calibration, &prof);
+                mouse.update(&proc_in, &prof);
+
                 if prof.emulation != active_mode {
+                    ds4_rgb = None;
                     reconcile_target(prof.emulation, &vigem, &mut active_mode, &mut target);
                 }
 
                 if let Some(vc) = target.as_deref_mut() {
-                    let _ = vc.submit(&parsed);
+                    let _ = vc.submit(&proc_in);
                     if let Some(fb) = vc.poll_feedback() {
                         if prof.enable_rumble
                             && (fb.large_motor != rumble_large || fb.small_motor != rumble_small)
@@ -212,18 +229,26 @@ fn session_loop(
                             rumble_small = fb.small_motor;
                             output_dirty = true;
                         }
+                        if let Some(rgb) = fb.lightbar_rgb {
+                            if ds4_rgb != Some(rgb) {
+                                ds4_rgb = Some(rgb);
+                                output_dirty = true;
+                            }
+                        }
                     }
                 }
 
+                let left_eff = prof.left_trigger_preset.effect();
+                let right_eff = prof.right_trigger_preset.effect();
                 if prof.lightbar_rgb != last_rgb
                     || prof.player_leds != last_leds
-                    || prof.left_trigger != last_left_trigger
-                    || prof.right_trigger != last_right_trigger
+                    || left_eff != last_left_trigger
+                    || right_eff != last_right_trigger
                 {
                     last_rgb = prof.lightbar_rgb;
                     last_leds = prof.player_leds;
-                    last_left_trigger = prof.left_trigger;
-                    last_right_trigger = prof.right_trigger;
+                    last_left_trigger = left_eff;
+                    last_right_trigger = right_eff;
                     output_dirty = true;
                 }
 
@@ -232,6 +257,7 @@ fn session_loop(
                         || last_output_write.elapsed() >= bt_min_interval
                         || (rumble_large == 0 && rumble_small == 0);
                     if can_write {
+                        let effective_rgb = ds4_rgb.unwrap_or(last_rgb);
                         flush_output(
                             &mut device,
                             &OutputState {
@@ -239,7 +265,7 @@ fn session_loop(
                                 motor_left: if prof.enable_rumble { rumble_large } else { 0 },
                                 motor_right: if prof.enable_rumble { rumble_small } else { 0 },
                                 update_lightbar: true,
-                                lightbar_rgb: last_rgb,
+                                lightbar_rgb: effective_rgb,
                                 update_player_leds: true,
                                 player_leds: last_leds,
                                 update_left_trigger: true,
@@ -273,7 +299,7 @@ fn session_loop(
                     rate_window_start = Instant::now();
                 }
 
-                parsed
+                proc_in
             }
             ReadOutcome::Timeout => continue,
             ReadOutcome::Cancelled | ReadOutcome::Disconnected => break,
@@ -284,14 +310,14 @@ fn session_loop(
             is_edge: info.is_edge,
             transport: info.transport,
             emulation: active_mode,
-            left_stick: [raw.left_x, raw.left_y],
-            right_stick: [raw.right_x, raw.right_y],
-            l2_analog: raw.l2_analog,
-            r2_analog: raw.r2_analog,
-            dpad: raw.dpad,
-            buttons: raw.buttons,
-            battery_percent: raw.battery_percent,
-            battery_status: raw.battery_status,
+            left_stick: [processed.left_x, processed.left_y],
+            right_stick: [processed.right_x, processed.right_y],
+            l2_analog: processed.l2_analog,
+            r2_analog: processed.r2_analog,
+            dpad: processed.dpad,
+            buttons: processed.buttons,
+            battery_percent: processed.battery_percent,
+            battery_status: processed.battery_status,
             polling_hz,
             proc_us_ema,
             proc_us_max,
@@ -301,7 +327,6 @@ fn session_loop(
         });
     }
 
-    // Zero rumble and withdraw adaptive trigger actuators on clean exit.
     flush_output(
         &mut device,
         &OutputState {
@@ -332,17 +357,33 @@ fn reconcile_target(
 ) {
     *target = None;
     *active = EmulationMode::None;
-    if desired == EmulationMode::Xbox360 {
-        if let Some(client) = vigem {
-            match Xbox360Target::new(client) {
-                Ok(t) => {
-                    *target = Some(Box::new(t));
-                    *active = EmulationMode::Xbox360;
+    match desired {
+        EmulationMode::None => {}
+        EmulationMode::Xbox360 => {
+            if let Some(client) = vigem {
+                match Xbox360Target::new(client) {
+                    Ok(t) => {
+                        *target = Some(Box::new(t));
+                        *active = EmulationMode::Xbox360;
+                    }
+                    Err(e) => warn!(error = %e, "Failed to plug in Xbox 360 virtual target"),
                 }
-                Err(e) => warn!(error = %e, "Failed to plug in Xbox 360 virtual target"),
+            } else {
+                warn!("Xbox 360 emulation requested, but ViGEmBus is unavailable");
             }
-        } else {
-            warn!("Xbox 360 emulation requested, but ViGEmBus is unavailable");
+        }
+        EmulationMode::DualShock4 => {
+            if let Some(client) = vigem {
+                match DualShock4Target::new(client) {
+                    Ok(t) => {
+                        *target = Some(Box::new(t));
+                        *active = EmulationMode::DualShock4;
+                    }
+                    Err(e) => warn!(error = %e, "Failed to plug in DualShock 4 virtual target"),
+                }
+            } else {
+                warn!("DualShock 4 emulation requested, but ViGEmBus is unavailable");
+            }
         }
     }
 }

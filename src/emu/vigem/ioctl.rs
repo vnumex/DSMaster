@@ -59,11 +59,24 @@ pub const IOCTL_XUSB_SUBMIT_REPORT: u32 = ctl_code(
     METHOD_BUFFERED,
     FILE_WRITE_DATA,
 );
+pub const IOCTL_DS4_SUBMIT_REPORT: u32 = ctl_code(
+    FILE_DEVICE_BUS_EXTENDER,
+    IOCTL_VIGEM_BASE + 0x202,
+    METHOD_BUFFERED,
+    FILE_WRITE_DATA,
+);
+pub const IOCTL_DS4_REQUEST_NOTIFICATION: u32 = ctl_code(
+    FILE_DEVICE_BUS_EXTENDER,
+    IOCTL_VIGEM_BASE + 0x203,
+    METHOD_BUFFERED,
+    FILE_WRITE_DATA,
+);
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VigemTargetType {
     Xbox360Wired = 0,
+    DualShock4Wired = 2,
 }
 
 #[repr(C)]
@@ -128,6 +141,43 @@ pub struct XusbRequestNotification {
     pub _pad: u8,
 }
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct Ds4SubmitReportEx {
+    pub size: u32,
+    pub serial_no: u32,
+    pub report: [u8; 63],
+}
+
+impl Default for Ds4SubmitReportEx {
+    fn default() -> Self {
+        Self {
+            size: size_of::<Self>() as u32,
+            serial_no: 0,
+            report: [0u8; 63],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ds4OutputReport {
+    pub small_motor: u8,
+    pub large_motor: u8,
+    pub lightbar_r: u8,
+    pub lightbar_g: u8,
+    pub lightbar_b: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ds4RequestNotification {
+    pub size: u32,
+    pub serial_no: u32,
+    pub report: Ds4OutputReport,
+    pub _pad: [u8; 3],
+}
+
 const _: () = {
     assert!(size_of::<VigemPluginTarget>() == 16);
     assert!(size_of::<VigemUnplugTarget>() == 8);
@@ -136,4 +186,7 @@ const _: () = {
     assert!(size_of::<XusbReport>() == 12);
     assert!(size_of::<XusbSubmitReport>() == 20);
     assert!(size_of::<XusbRequestNotification>() == 12);
+    assert!(size_of::<Ds4SubmitReportEx>() == 71);
+    assert!(size_of::<Ds4OutputReport>() == 5);
+    assert!(size_of::<Ds4RequestNotification>() == 16);
 };
