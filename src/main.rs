@@ -9,6 +9,7 @@ mod startup;
 mod tray;
 mod ui;
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -39,13 +40,24 @@ fn main() {
     let mut engine_opt = Some(Engine::start(initial_config.clone()).map_err(|e| e.to_string()));
 
     Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1040.0), px(680.0)), cx);
+        let _ = cx.text_system().add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-400.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-500.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-600.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-700.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-400.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-600.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-700.ttf").as_slice()),
+        ]);
+
+        let bounds = Bounds::centered(None, size(px(1560.0), px(940.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(880.0), px(580.0))),
+            window_min_size: Some(size(px(1120.0), px(700.0))),
             show: !start_hidden,
             titlebar: Some(TitlebarOptions {
                 title: Some("DSMaster".into()),
+                appears_transparent: true,
                 ..Default::default()
             }),
             ..Default::default()
