@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Release (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        shell: pwsh
+        run: cargo test --locked
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --locked
+
+      - name: Package release archive & checksums
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $env:GITHUB_REF_NAME
+          } else {
+            "dev-" + $env:GITHUB_SHA.Substring(0, 7)
+          }
+
+          $stage = Join-Path "dist" "DSMaster"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item "target\release\dsmaster.exe" $stage -Force
+          Copy-Item "README.md" $stage -Force
+          Copy-Item "LICENSE" $stage -Force
+
+          $zipName = "DSMaster-$tag-windows-x64.zip"
+          $zipPath = Join-Path "dist" $zipName
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+
+          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeHash = (Get-FileHash "target\release\dsmaster.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "$zipHash  $zipName"
+            "$exeHash  dsmaster.exe"
+          ) | Set-Content -Path (Join-Path "dist" "SHA256SUMS.txt") -Encoding utf8
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsmaster-release-windows-x64
+          path: |
+            dist/DSMaster-*.zip
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/DSMaster-*.zip
+            dist/SHA256SUMS.txt
