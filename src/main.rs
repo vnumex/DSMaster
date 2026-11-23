@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod cloak;
+mod drivers;
 mod emu;
 mod engine;
 mod hid;
@@ -19,6 +20,7 @@ use gpui::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::cloak::HidHideManager;
+use crate::emu::dualsense::is_usbip_win2_installed;
 use crate::emu::vigem::is_vigem_installed;
 use crate::engine::Engine;
 use crate::engine::profiles_store::load_config;
@@ -35,19 +37,21 @@ fn main() {
 
     let vigem_available = is_vigem_installed();
     let hidhide_available = HidHideManager::is_available();
+    let vds_available = is_usbip_win2_installed();
     let initial_config = load_config();
     let start_hidden = initial_config.work_in_background && initial_config.start_minimized;
     let mut engine_opt = Some(Engine::start(initial_config.clone()).map_err(|e| e.to_string()));
 
     Application::new().run(move |cx: &mut App| {
         let _ = cx.text_system().add_fonts(vec![
-            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-400.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-500.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-600.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Geist-700.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-400.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-600.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-700.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/DMSans-400.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/DMSans-500.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/DMSans-600.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/DMSans-700.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-400.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-500.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-600.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-700.ttf").as_slice()),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1560.0), px(940.0)), cx);
@@ -91,6 +95,7 @@ fn main() {
                     engine_res,
                     vigem_available,
                     hidhide_available,
+                    vds_available,
                     initial_config,
                     ctl,
                     window,

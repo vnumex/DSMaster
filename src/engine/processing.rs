@@ -15,6 +15,7 @@ pub struct ProcessedInput {
     pub right_y: u8,
     pub l2_analog: u8,
     pub r2_analog: u8,
+    pub seq_number: u8,
     pub dpad: DPad,
     pub buttons: DualSenseButtons,
     pub gyro: [i16; 3],
@@ -24,6 +25,37 @@ pub struct ProcessedInput {
     pub touch: [TouchPoint; 2],
     pub battery_percent: u8,
     pub battery_status: BatteryStatus,
+    pub headphone_connected: bool,
+    pub mic_connected: bool,
+    pub mic_muted_hw: bool,
+}
+
+impl ProcessedInput {
+    /// Converts the processed controller state back into a `RawInputState` suitable for
+    /// encoding into a 64-byte DualSense USB HID Input Report (`0x01`).
+    #[inline]
+    pub const fn to_raw_input_state(&self) -> RawInputState {
+        RawInputState {
+            left_x: self.left_x,
+            left_y: self.left_y,
+            right_x: self.right_x,
+            right_y: self.right_y,
+            l2_analog: self.l2_analog,
+            r2_analog: self.r2_analog,
+            seq_number: self.seq_number,
+            dpad: self.dpad,
+            buttons: self.buttons,
+            gyro: self.gyro,
+            accel: self.accel,
+            sensor_timestamp: self.sensor_timestamp,
+            touch: self.touch,
+            battery_percent: self.battery_percent,
+            battery_status: self.battery_status,
+            headphone_connected: self.headphone_connected,
+            mic_connected: self.mic_connected,
+            mic_muted_hw: self.mic_muted_hw,
+        }
+    }
 }
 
 #[inline]
@@ -135,6 +167,7 @@ pub fn process_input(
         right_y: right[1],
         l2_analog,
         r2_analog,
+        seq_number: raw.seq_number,
         dpad: raw.dpad,
         buttons,
         gyro: raw.gyro,
@@ -148,6 +181,9 @@ pub fn process_input(
         touch: raw.touch,
         battery_percent: raw.battery_percent,
         battery_status: raw.battery_status,
+        headphone_connected: raw.headphone_connected,
+        mic_connected: raw.mic_connected,
+        mic_muted_hw: raw.mic_muted_hw,
     }
 }
 

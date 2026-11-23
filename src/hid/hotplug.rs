@@ -79,6 +79,14 @@ impl Drop for HotPlugMonitor {
     }
 }
 
+fn should_forward_hotplug_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if !lower.contains("vid_054c") && !lower.contains("vid&0002054c") {
+        return false;
+    }
+    !super::enumerate::is_excluded_virtual_identifier(path)
+}
+
 unsafe extern "system" fn pnp_callback(
     _hnotify: HCMNOTIFICATION,
     context: *const c_void,
@@ -112,8 +120,7 @@ unsafe extern "system" fn pnp_callback(
         std::slice::from_raw_parts(base_ptr.add(sym_offset) as *const u16, sym_bytes / 2)
     };
     let path = wide_to_string(sym_u16);
-    let lower = path.to_ascii_lowercase();
-    if !lower.contains("vid_054c") && !lower.contains("vid&0002054c") {
+    if !should_forward_hotplug_path(&path) {
         return 0;
     }
 
@@ -124,4 +131,33 @@ unsafe extern "system" fn pnp_callback(
     };
     let _ = ctx.tx.try_send(ev);
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hid::enumerate::{register_virtual_serial, unregister_virtual_serial};
+
+    #[test]
+    fn hotplug_filter_accepts_physical_and_rejects_virtual_dualsense() {
+        assert!(should_forward_hotplug_path(
+            r"\\?\hid#vid_054c&pid_0ce6&mi_03#8&11403f6e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        assert!(should_forward_hotplug_path(
+            r"\\?\hid#{00001124-0000-1000-8000-00805f9b34fb}_vid&0002054c_pid&0ce6#9&1234&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        assert!(!should_forward_hotplug_path(
+            r"\\?\hid#vid_054c&pid_0ce6#dsmaster-vds-01#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        assert!(!should_forward_hotplug_path(
+            r"\\?\hid#usbip_vid_054c&pid_0ce6#7&1234#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+
+        let dyn_serial = "HOTPLUG-DYN-VDS-99";
+        register_virtual_serial(dyn_serial);
+        assert!(!should_forward_hotplug_path(
+            r"\\?\hid#vid_054c&pid_0ce6#hotplug-dyn-vds-99#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        unregister_virtual_serial(dyn_serial);
+    }
 }

@@ -224,18 +224,6 @@ pub fn settings_icon(size: f32, col: u32) -> Div {
     })
 }
 
-pub fn shield_icon(size: f32, col: u32) -> Div {
-    stroke_icon(size, col, ICON_STROKE, |b, xf| {
-        b.move_to(xf.pt(12.0, 3.2));
-        b.line_to(xf.pt(19.2, 6.0));
-        b.line_to(xf.pt(19.2, 11.8));
-        b.cubic_bezier_to(xf.pt(12.0, 20.8), xf.pt(19.2, 16.4), xf.pt(15.6, 19.2));
-        b.cubic_bezier_to(xf.pt(4.8, 11.8), xf.pt(8.4, 19.2), xf.pt(4.8, 16.4));
-        b.line_to(xf.pt(4.8, 6.0));
-        b.close();
-    })
-}
-
 pub fn check_icon(size: f32, col: u32) -> Div {
     let w = if size <= 13.0 {
         MICRO_STROKE

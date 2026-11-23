@@ -4,6 +4,10 @@ pub const SONY_VID: u16 = 0x054C;
 pub const DUALSENSE_PID: u16 = 0x0CE6;
 pub const DUALSENSE_EDGE_PID: u16 = 0x0DF2;
 
+/// Prefix embedded in virtual DualSense USB serial strings for self-exclusion & HidHide safety.
+#[allow(dead_code)]
+pub const VIRTUAL_SERIAL_PREFIX: &str = "DSMASTER-VDS";
+
 pub const DS_INPUT_REPORT_USB: u8 = 0x01;
 pub const DS_INPUT_REPORT_USB_SIZE: usize = 64;
 pub const DS_INPUT_REPORT_BT: u8 = 0x31;
@@ -16,6 +20,14 @@ pub const DS_OUTPUT_REPORT_BT_SIZE: usize = 78;
 
 pub const DS_FEATURE_REPORT_CALIBRATION: u8 = 0x05;
 pub const DS_FEATURE_REPORT_CALIBRATION_SIZE: usize = 41;
+#[allow(dead_code)]
+pub const FEATURE_REPORT_PAIRING_ID: u8 = 0x09;
+#[allow(dead_code)]
+pub const FEATURE_REPORT_PAIRING_SIZE: usize = 20;
+#[allow(dead_code)]
+pub const FEATURE_REPORT_FIRMWARE_ID: u8 = 0x20;
+#[allow(dead_code)]
+pub const FEATURE_REPORT_FIRMWARE_SIZE: usize = 64;
 
 pub const PS_INPUT_CRC32_SEED: u8 = 0xA1;
 pub const PS_OUTPUT_CRC32_SEED: u8 = 0xA2;

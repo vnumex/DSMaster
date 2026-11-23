@@ -1,7 +1,7 @@
 use gpui::{BoxShadow, Hsla, Rgba, point, px, rgb, rgba};
 
-pub const FONT_SANS: &str = "Geist";
-pub const FONT_MONO: &str = "Geist Mono";
+pub const FONT_SANS: &str = "DM Sans";
+pub const FONT_MONO: &str = "JetBrains Mono";
 
 // Quiet cool-graphite neutral ramp (surface steps + 7% hairlines, zero glow)
 pub const RAIL_BG: u32 = 0x101214; // Far-left icon rail & custom frameless titlebar
@@ -84,4 +84,86 @@ pub fn lerp_rgb(from: u32, to: u32, t: f32) -> u32 {
     let g = (g0 + (g1 - g0) * t).round() as u32;
     let b = (b0 + (b1 - b0) * t).round() as u32;
     (r << 16) | (g << 8) | b
+}
+
+#[inline]
+pub fn rgb_to_u32(rgb: [u8; 3]) -> u32 {
+    ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | (rgb[2] as u32)
+}
+
+pub fn rgb_to_hsv(rgb: [u8; 3]) -> (f32, f32, f32) {
+    let r = rgb[0] as f32 / 255.0;
+    let g = rgb[1] as f32 / 255.0;
+    let b = rgb[2] as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let h = if delta < 1e-6 {
+        0.0
+    } else if (max - r).abs() < 1e-6 {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if (max - g).abs() < 1e-6 {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    let s = if max < 1e-6 { 0.0 } else { delta / max };
+    (h.rem_euclid(360.0), s.clamp(0.0, 1.0), max.clamp(0.0, 1.0))
+}
+
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let h = h.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    [
+        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsv_rgb_round_trip_for_primaries_and_presets() {
+        let samples = [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [0, 102, 255],
+            [242, 208, 107],
+            [148, 86, 245],
+            [0, 0, 0],
+            [255, 255, 255],
+        ];
+        for rgb in samples {
+            let (h, s, v) = rgb_to_hsv(rgb);
+            let back = hsv_to_rgb(h, s, v);
+            for i in 0..3 {
+                assert!(
+                    (rgb[i] as i32 - back[i] as i32).abs() <= 1,
+                    "round-trip mismatch for {rgb:?}: got {back:?}"
+                );
+            }
+        }
+    }
 }

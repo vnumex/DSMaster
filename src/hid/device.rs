@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::protocol::{
@@ -80,6 +81,7 @@ pub struct DualSenseDevice {
     write_ov: Box<OVERLAPPED>,
     read_buf: Box<[u8]>,
     write_buf: Box<[u8]>,
+    raw_calibration_05: Cell<Option<[u8; DS_FEATURE_REPORT_CALIBRATION_SIZE]>>,
 }
 
 unsafe impl Send for DualSenseDevice {}
@@ -127,12 +129,20 @@ impl DualSenseDevice {
             write_ov: Box::new(OVERLAPPED::default()),
             read_buf,
             write_buf,
+            raw_calibration_05: Cell::new(None),
         })
     }
 
     #[inline]
     pub fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    /// Returns the raw 41-byte Feature Report `0x05` captured during `read_feature_calibration`.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn raw_calibration_05(&self) -> Option<[u8; DS_FEATURE_REPORT_CALIBRATION_SIZE]> {
+        self.raw_calibration_05.get()
     }
 
     #[inline]
@@ -168,7 +178,12 @@ impl DualSenseDevice {
             return Err(HidError::Os("HidD_GetFeature(0x05)", err));
         }
         match parse_calibration_report(&buf) {
-            Ok(cal) => Ok(Some(cal)),
+            Ok(cal) => {
+                let mut raw = [0u8; DS_FEATURE_REPORT_CALIBRATION_SIZE];
+                raw.copy_from_slice(&buf[..DS_FEATURE_REPORT_CALIBRATION_SIZE]);
+                self.raw_calibration_05.set(Some(raw));
+                Ok(Some(cal))
+            }
             Err(_) => Ok(None),
         }
     }

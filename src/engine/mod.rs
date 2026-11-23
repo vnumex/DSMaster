@@ -26,6 +26,7 @@ use tracing::{info, warn};
 use self::app_watcher::ForegroundAppWatcher;
 use self::session::ControllerSessionHandle;
 use crate::cloak::HidHideManager;
+use crate::emu::EmuBackends;
 use crate::emu::vigem::VigemClient;
 use crate::hid::{
     DeviceInfo, DualSenseDevice, HotPlugEvent, HotPlugMonitor, enumerate_dualsense_devices,
@@ -67,14 +68,15 @@ impl Engine {
         let vigem = match VigemClient::connect() {
             Ok(c) => Some(c),
             Err(e) => {
-                warn!(error = %e, "ViGEmBus unavailable; running without virtual controller output");
+                warn!(error = %e, "ViGEmBus unavailable; Xbox 360 / DualShock 4 emulation unavailable");
                 None
             }
         };
+        let backends = EmuBackends { vigem };
 
         let initial_devices = enumerate_dualsense_devices()?;
         for info in initial_devices {
-            try_attach_device(info, &vigem, &profile, &sessions, &topology_version);
+            try_attach_device(info, &backends, &profile, &sessions, &topology_version);
         }
         if cloak_flag {
             let ids = collect_instance_ids(&sessions);
@@ -110,7 +112,7 @@ impl Engine {
                                     let key = path.to_ascii_lowercase();
                                     if !sessions_c.lock().contains_key(&key) {
                                         if let Some(info) = inspect_hid_path(&path) {
-                                            try_attach_device(info, &vigem, &profile_c, &sessions_c, &topo_c);
+                                            try_attach_device(info, &backends, &profile_c, &sessions_c, &topo_c);
                                         }
                                     }
                                 }
@@ -248,7 +250,7 @@ fn collect_instance_ids(
 
 fn try_attach_device(
     info: DeviceInfo,
-    vigem: &Option<VigemClient>,
+    backends: &EmuBackends,
     profile: &Arc<ArcSwap<ControllerProfile>>,
     sessions: &Arc<Mutex<HashMap<String, ControllerSessionHandle>>>,
     topology_version: &Arc<AtomicU64>,
@@ -257,7 +259,7 @@ fn try_attach_device(
     match DualSenseDevice::open(info) {
         Ok(device) => match ControllerSessionHandle::spawn(
             device,
-            vigem.clone(),
+            backends.clone(),
             Arc::clone(profile),
             Arc::clone(topology_version),
         ) {

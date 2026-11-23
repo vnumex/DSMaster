@@ -138,9 +138,9 @@ impl VirtualController for DualShock4Target {
         let g = ((packed >> 24) & 0xFF) as u8;
         let b = ((packed >> 32) & 0xFF) as u8;
         Some(FeedbackState {
-            large_motor: (packed & 0xFF) as u8,
-            small_motor: ((packed >> 8) & 0xFF) as u8,
+            rumble: Some(((packed & 0xFF) as u8, ((packed >> 8) & 0xFF) as u8)),
             lightbar_rgb: Some([r, g, b]),
+            ..Default::default()
         })
     }
 }

@@ -16,14 +16,14 @@ use super::processing::process_input;
 use super::profile::ControllerProfile;
 use super::seqlock::SeqLock;
 use super::telemetry::TelemetrySnapshot;
-use crate::emu::vigem::VigemClient;
+use crate::emu::dualsense::VirtualDualSenseConfig;
 use crate::emu::vigem::ds4::DualShock4Target;
 use crate::emu::vigem::x360::Xbox360Target;
-use crate::emu::{EmulationMode, VirtualController};
-use crate::hid::{CancelHandle, DualSenseDevice, ReadOutcome};
+use crate::emu::{EmuBackends, EmulationMode, VirtualController};
+use crate::hid::{CancelHandle, DeviceInfo, DualSenseDevice, ReadOutcome};
 use crate::protocol::{
-    AdaptiveTriggerEffect, ImuCalibration, OutputState, ProtocolError, Transport,
-    encode_output_report, parse_input_report,
+    AdaptiveTriggerEffect, DS_FEATURE_REPORT_CALIBRATION_SIZE, ImuCalibration, OutputState,
+    ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX, encode_output_report, parse_input_report,
 };
 
 struct MmcssGuard(HANDLE);
@@ -54,7 +54,7 @@ pub struct ControllerSessionHandle {
 impl ControllerSessionHandle {
     pub fn spawn(
         device: DualSenseDevice,
-        vigem: Option<VigemClient>,
+        backends: EmuBackends,
         profile: Arc<ArcSwap<ControllerProfile>>,
         topology_version: Arc<AtomicU64>,
     ) -> std::io::Result<Self> {
@@ -74,7 +74,9 @@ impl ControllerSessionHandle {
 
         let join_handle = thread::Builder::new()
             .name(format!("ds-io-{}", info.product_id))
-            .spawn(move || session_loop(device, vigem, profile, tel_c, stop_c, topology_version))?;
+            .spawn(move || {
+                session_loop(device, backends, profile, tel_c, stop_c, topology_version)
+            })?;
 
         Ok(Self {
             instance_id: info.instance_id,
@@ -108,7 +110,7 @@ impl Drop for ControllerSessionHandle {
 
 fn session_loop(
     mut device: DualSenseDevice,
-    vigem: Option<VigemClient>,
+    backends: EmuBackends,
     profile_swap: Arc<ArcSwap<ControllerProfile>>,
     telemetry: Arc<SeqLock<TelemetrySnapshot>>,
     stop_flag: Arc<AtomicBool>,
@@ -136,9 +138,12 @@ fn session_loop(
     let mut active_mode = EmulationMode::None;
     let mut target: Option<Box<dyn VirtualController>> = None;
     let initial_prof = *profile_swap.load_full();
+    let mut last_requested_mode = initial_prof.emulation;
     reconcile_target(
         initial_prof.emulation,
-        &vigem,
+        &backends,
+        &info,
+        device.raw_calibration_05(),
         &mut active_mode,
         &mut target,
     );
@@ -148,16 +153,21 @@ fn session_loop(
     let mut last_override_lightbar = initial_prof.override_lightbar;
     let mut last_override_triggers = initial_prof.override_triggers;
     let mut last_rgb = initial_prof.lightbar_rgb;
-    let mut ds4_rgb: Option<[u8; 3]> = None;
+    let mut game_rgb: Option<[u8; 3]> = None;
     let mut last_leds = initial_prof.player_leds;
+    let mut game_leds: Option<u8> = None;
     let mut last_left_trigger = initial_prof.left_trigger_preset.effect();
     let mut last_right_trigger = initial_prof.right_trigger_preset.effect();
+    let mut game_left_trigger: Option<[u8; 11]> = None;
+    let mut game_right_trigger: Option<[u8; 11]> = None;
     let mut rumble_large: u8 = 0;
     let mut rumble_small: u8 = 0;
     let mut triggers_touched = initial_prof.override_triggers;
     let mut dirty_rumble = false;
     let mut dirty_lightbar = false;
-    let mut dirty_triggers = false;
+    let mut dirty_player_leds = false;
+    let mut dirty_left_trigger = false;
+    let mut dirty_right_trigger = false;
     let mut release_triggers = false;
 
     if initial_prof.override_lightbar || initial_prof.override_triggers {
@@ -222,30 +232,82 @@ fn session_loop(
                 let proc_in = process_input(&raw, &calibration, &prof);
                 mouse.update(&proc_in, &prof);
 
-                if prof.emulation != active_mode {
-                    ds4_rgb = None;
-                    reconcile_target(prof.emulation, &vigem, &mut active_mode, &mut target);
+                if prof.emulation != last_requested_mode {
+                    last_requested_mode = prof.emulation;
+                    game_rgb = None;
+                    game_leds = None;
+                    let had_game_triggers =
+                        game_left_trigger.take().is_some() || game_right_trigger.take().is_some();
+                    if had_game_triggers && !prof.override_triggers && triggers_touched {
+                        release_triggers = true;
+                        dirty_left_trigger = false;
+                        dirty_right_trigger = false;
+                    }
+                    if rumble_large != 0 || rumble_small != 0 {
+                        rumble_large = 0;
+                        rumble_small = 0;
+                        dirty_rumble = true;
+                    }
+                    reconcile_target(
+                        prof.emulation,
+                        &backends,
+                        &info,
+                        device.raw_calibration_05(),
+                        &mut active_mode,
+                        &mut target,
+                    );
                 }
 
                 if let Some(vc) = target.as_deref_mut() {
                     let _ = vc.submit(&proc_in);
                     if let Some(fb) = vc.poll_feedback() {
-                        if prof.enable_rumble {
-                            if fb.large_motor != rumble_large || fb.small_motor != rumble_small {
-                                rumble_large = fb.large_motor;
-                                rumble_small = fb.small_motor;
+                        if let Some((large, small)) = fb.rumble {
+                            if prof.enable_rumble {
+                                if large != rumble_large || small != rumble_small {
+                                    rumble_large = large;
+                                    rumble_small = small;
+                                    dirty_rumble = true;
+                                }
+                            } else if rumble_large != 0 || rumble_small != 0 {
+                                rumble_large = 0;
+                                rumble_small = 0;
                                 dirty_rumble = true;
                             }
-                        } else if rumble_large != 0 || rumble_small != 0 {
-                            rumble_large = 0;
-                            rumble_small = 0;
-                            dirty_rumble = true;
                         }
-                        if prof.override_lightbar {
-                            if let Some(rgb) = fb.lightbar_rgb {
-                                if ds4_rgb != Some(rgb) {
-                                    ds4_rgb = Some(rgb);
+                        if let Some(rgb) = fb.lightbar_rgb {
+                            if game_rgb != Some(rgb) {
+                                game_rgb = Some(rgb);
+                                if !prof.override_lightbar {
                                     dirty_lightbar = true;
+                                }
+                            }
+                        }
+                        if let Some(leds) = fb.player_leds {
+                            let masked = leds & 0x1F;
+                            if game_leds != Some(masked) {
+                                game_leds = Some(masked);
+                                if !prof.override_lightbar {
+                                    dirty_player_leds = true;
+                                }
+                            }
+                        }
+                        if let Some(raw_l) = fb.left_trigger_raw {
+                            if game_left_trigger != Some(raw_l) {
+                                game_left_trigger = Some(raw_l);
+                                if !prof.override_triggers {
+                                    dirty_left_trigger = true;
+                                    release_triggers = false;
+                                    triggers_touched = true;
+                                }
+                            }
+                        }
+                        if let Some(raw_r) = fb.right_trigger_raw {
+                            if game_right_trigger != Some(raw_r) {
+                                game_right_trigger = Some(raw_r);
+                                if !prof.override_triggers {
+                                    dirty_right_trigger = true;
+                                    release_triggers = false;
+                                    triggers_touched = true;
                                 }
                             }
                         }
@@ -264,16 +326,20 @@ fn session_loop(
                         last_rgb = prof.lightbar_rgb;
                         last_leds = prof.player_leds;
                         dirty_lightbar = true;
+                        dirty_player_leds = true;
                     } else {
-                        ds4_rgb = None;
-                        dirty_lightbar = false;
+                        dirty_lightbar = game_rgb.is_some();
+                        dirty_player_leds = game_leds.is_some();
                     }
-                } else if prof.override_lightbar
-                    && (prof.lightbar_rgb != last_rgb || prof.player_leds != last_leds)
-                {
-                    last_rgb = prof.lightbar_rgb;
-                    last_leds = prof.player_leds;
-                    dirty_lightbar = true;
+                } else if prof.override_lightbar {
+                    if prof.lightbar_rgb != last_rgb {
+                        last_rgb = prof.lightbar_rgb;
+                        dirty_lightbar = true;
+                    }
+                    if prof.player_leds != last_leds {
+                        last_leds = prof.player_leds;
+                        dirty_player_leds = true;
+                    }
                 }
 
                 let left_eff = prof.left_trigger_preset.effect();
@@ -283,34 +349,81 @@ fn session_loop(
                     if prof.override_triggers {
                         last_left_trigger = left_eff;
                         last_right_trigger = right_eff;
-                        dirty_triggers = true;
+                        dirty_left_trigger = true;
+                        dirty_right_trigger = true;
+                        release_triggers = false;
+                        triggers_touched = true;
+                    } else if game_left_trigger.is_some() || game_right_trigger.is_some() {
+                        dirty_left_trigger = true;
+                        dirty_right_trigger = true;
                         release_triggers = false;
                         triggers_touched = true;
                     } else {
-                        dirty_triggers = false;
+                        dirty_left_trigger = false;
+                        dirty_right_trigger = false;
                         if triggers_touched {
                             release_triggers = true;
                         }
                     }
-                } else if prof.override_triggers
-                    && (left_eff != last_left_trigger || right_eff != last_right_trigger)
-                {
-                    last_left_trigger = left_eff;
-                    last_right_trigger = right_eff;
-                    dirty_triggers = true;
-                    triggers_touched = true;
+                } else if prof.override_triggers {
+                    if left_eff != last_left_trigger {
+                        last_left_trigger = left_eff;
+                        dirty_left_trigger = true;
+                        triggers_touched = true;
+                    }
+                    if right_eff != last_right_trigger {
+                        last_right_trigger = right_eff;
+                        dirty_right_trigger = true;
+                        triggers_touched = true;
+                    }
                 }
 
-                if dirty_rumble || dirty_lightbar || dirty_triggers || release_triggers {
+                if dirty_rumble
+                    || dirty_lightbar
+                    || dirty_player_leds
+                    || dirty_left_trigger
+                    || dirty_right_trigger
+                    || release_triggers
+                {
                     let can_write = info.transport == Transport::Usb
                         || last_output_write.elapsed() >= bt_min_interval
                         || (dirty_rumble && rumble_large == 0 && rumble_small == 0)
                         || release_triggers;
                     if can_write {
-                        let effective_rgb = ds4_rgb.unwrap_or(last_rgb);
-                        let update_lb = dirty_lightbar && prof.override_lightbar;
-                        let update_trig =
-                            (dirty_triggers && prof.override_triggers) || release_triggers;
+                        let update_lb = dirty_lightbar && (prof.override_lightbar || game_rgb.is_some());
+                        let effective_rgb = if prof.override_lightbar {
+                            last_rgb
+                        } else {
+                            game_rgb.unwrap_or(last_rgb)
+                        };
+                        let update_leds =
+                            dirty_player_leds && (prof.override_lightbar || game_leds.is_some());
+                        let effective_leds = if prof.override_lightbar {
+                            last_leds
+                        } else {
+                            game_leds.unwrap_or(last_leds)
+                        };
+                        let update_left_trig = release_triggers || dirty_left_trigger;
+                        let update_right_trig = release_triggers || dirty_right_trigger;
+                        let effective_left_trig = if release_triggers {
+                            AdaptiveTriggerEffect::Off
+                        } else if prof.override_triggers {
+                            last_left_trigger
+                        } else {
+                            game_left_trigger
+                                .map(AdaptiveTriggerEffect::Raw)
+                                .unwrap_or(AdaptiveTriggerEffect::Off)
+                        };
+                        let effective_right_trig = if release_triggers {
+                            AdaptiveTriggerEffect::Off
+                        } else if prof.override_triggers {
+                            last_right_trigger
+                        } else {
+                            game_right_trigger
+                                .map(AdaptiveTriggerEffect::Raw)
+                                .unwrap_or(AdaptiveTriggerEffect::Off)
+                        };
+
                         flush_output(
                             &mut device,
                             &OutputState {
@@ -319,20 +432,12 @@ fn session_loop(
                                 motor_right: rumble_small,
                                 update_lightbar: update_lb,
                                 lightbar_rgb: effective_rgb,
-                                update_player_leds: update_lb,
-                                player_leds: last_leds,
-                                update_left_trigger: update_trig,
-                                left_trigger: if release_triggers {
-                                    AdaptiveTriggerEffect::Off
-                                } else {
-                                    last_left_trigger
-                                },
-                                update_right_trigger: update_trig,
-                                right_trigger: if release_triggers {
-                                    AdaptiveTriggerEffect::Off
-                                } else {
-                                    last_right_trigger
-                                },
+                                update_player_leds: update_leds,
+                                player_leds: effective_leds,
+                                update_left_trigger: update_left_trig,
+                                left_trigger: effective_left_trig,
+                                update_right_trigger: update_right_trig,
+                                right_trigger: effective_right_trig,
                                 ..Default::default()
                             },
                             &mut bt_seq,
@@ -342,7 +447,9 @@ fn session_loop(
                         }
                         dirty_rumble = false;
                         dirty_lightbar = false;
-                        dirty_triggers = false;
+                        dirty_player_leds = false;
+                        dirty_left_trigger = false;
+                        dirty_right_trigger = false;
                         release_triggers = false;
                         last_output_write = Instant::now();
                     }
@@ -394,8 +501,8 @@ fn session_loop(
             rumble_large,
             rumble_small,
             touch: processed.touch,
-            active_lightbar_rgb: if last_override_lightbar {
-                ds4_rgb
+            active_lightbar_rgb: if !last_override_lightbar {
+                game_rgb
             } else {
                 None
             },
@@ -427,9 +534,38 @@ fn session_loop(
     info!(path = %info.device_path, "Controller session stopped");
 }
 
+fn build_virtual_dualsense_config(
+    info: &DeviceInfo,
+    raw_calibration_05: Option<[u8; DS_FEATURE_REPORT_CALIBRATION_SIZE]>,
+) -> VirtualDualSenseConfig {
+    let seed = if !info.instance_id.is_empty() {
+        info.instance_id.as_bytes()
+    } else {
+        info.device_path.as_bytes()
+    };
+    let mut h: u32 = 0x811C_9DC5;
+    for &b in seed {
+        h ^= b.to_ascii_uppercase() as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    let tag = ((h ^ (h >> 16)) & 0xFFFF) as u16;
+    let tag = if tag == 0 { 1 } else { tag };
+    let hi = (tag >> 8) as u8;
+    let lo = (tag & 0xFF) as u8;
+
+    VirtualDualSenseConfig {
+        raw_calibration_05,
+        // Locally-administered unicast MAC ("DSM") + deterministic 16-bit controller tag.
+        virtual_mac: [0x02, 0x44, 0x53, 0x4D, hi, lo],
+        serial_tag: format!("{VIRTUAL_SERIAL_PREFIX}-{tag:04X}"),
+    }
+}
+
 fn reconcile_target(
     desired: EmulationMode,
-    vigem: &Option<VigemClient>,
+    backends: &EmuBackends,
+    info: &DeviceInfo,
+    raw_calibration_05: Option<[u8; DS_FEATURE_REPORT_CALIBRATION_SIZE]>,
     active: &mut EmulationMode,
     target: &mut Option<Box<dyn VirtualController>>,
 ) {
@@ -438,7 +574,7 @@ fn reconcile_target(
     match desired {
         EmulationMode::None => {}
         EmulationMode::Xbox360 => {
-            if let Some(client) = vigem {
+            if let Some(client) = &backends.vigem {
                 match Xbox360Target::new(client) {
                     Ok(t) => {
                         *target = Some(Box::new(t));
@@ -451,7 +587,7 @@ fn reconcile_target(
             }
         }
         EmulationMode::DualShock4 => {
-            if let Some(client) = vigem {
+            if let Some(client) = &backends.vigem {
                 match DualShock4Target::new(client) {
                     Ok(t) => {
                         *target = Some(Box::new(t));
@@ -461,6 +597,16 @@ fn reconcile_target(
                 }
             } else {
                 warn!("DualShock 4 emulation requested, but ViGEmBus is unavailable");
+            }
+        }
+        EmulationMode::DualSense => {
+            let cfg = build_virtual_dualsense_config(info, raw_calibration_05);
+            match backends.spawn_dualsense(cfg) {
+                Ok(t) => {
+                    *target = Some(t);
+                    *active = EmulationMode::DualSense;
+                }
+                Err(e) => warn!(error = %e, "Failed to plug in Virtual DualSense target"),
             }
         }
     }

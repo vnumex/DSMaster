@@ -112,6 +112,135 @@ fn parse_touch_point(tp: &[u8]) -> TouchPoint {
     TouchPoint { active, id, x, y }
 }
 
+#[inline]
+fn encode_touch_point(tp: TouchPoint, out: &mut [u8]) {
+    let contact = (tp.id & 0x7F) | if tp.active { 0x00 } else { 0x80 };
+    let x = tp.x & 0x0FFF;
+    let y = tp.y & 0x0FFF;
+    out[0] = contact;
+    out[1] = (x & 0xFF) as u8;
+    out[2] = (((x >> 8) & 0x0F) as u8) | (((y & 0x0F) as u8) << 4);
+    out[3] = (y >> 4) as u8;
+}
+
+/// Encodes a `RawInputState` into a 64-byte DualSense USB HID Input Report (`0x01`)
+/// with zero heap allocations.
+#[allow(dead_code)]
+#[inline]
+pub fn encode_usb_input_report(state: &RawInputState, out: &mut [u8; DS_INPUT_REPORT_USB_SIZE]) {
+    out.fill(0);
+    out[0] = DS_INPUT_REPORT_USB;
+
+    let payload = &mut out[1..DS_INPUT_REPORT_USB_SIZE];
+    payload[0] = state.left_x;
+    payload[1] = state.left_y;
+    payload[2] = state.right_x;
+    payload[3] = state.right_y;
+    payload[4] = state.l2_analog;
+    payload[5] = state.r2_analog;
+    payload[6] = state.seq_number;
+
+    let mut b0: u8 = (state.dpad as u8) & 0x0F;
+    let mut b1: u8 = 0;
+    let mut b2: u8 = 0;
+
+    let b = state.buttons;
+    if b.contains(DualSenseButtons::SQUARE) {
+        b0 |= 1 << 4;
+    }
+    if b.contains(DualSenseButtons::CROSS) {
+        b0 |= 1 << 5;
+    }
+    if b.contains(DualSenseButtons::CIRCLE) {
+        b0 |= 1 << 6;
+    }
+    if b.contains(DualSenseButtons::TRIANGLE) {
+        b0 |= 1 << 7;
+    }
+    if b.contains(DualSenseButtons::L1) {
+        b1 |= 1 << 0;
+    }
+    if b.contains(DualSenseButtons::R1) {
+        b1 |= 1 << 1;
+    }
+    if b.contains(DualSenseButtons::L2_DIGITAL) {
+        b1 |= 1 << 2;
+    }
+    if b.contains(DualSenseButtons::R2_DIGITAL) {
+        b1 |= 1 << 3;
+    }
+    if b.contains(DualSenseButtons::CREATE) {
+        b1 |= 1 << 4;
+    }
+    if b.contains(DualSenseButtons::OPTIONS) {
+        b1 |= 1 << 5;
+    }
+    if b.contains(DualSenseButtons::L3) {
+        b1 |= 1 << 6;
+    }
+    if b.contains(DualSenseButtons::R3) {
+        b1 |= 1 << 7;
+    }
+    if b.contains(DualSenseButtons::PS_HOME) {
+        b2 |= 1 << 0;
+    }
+    if b.contains(DualSenseButtons::TOUCHPAD) {
+        b2 |= 1 << 1;
+    }
+    if b.contains(DualSenseButtons::MIC_MUTE) {
+        b2 |= 1 << 2;
+    }
+    if b.contains(DualSenseButtons::EDGE_FN1) {
+        b2 |= 1 << 4;
+    }
+    if b.contains(DualSenseButtons::EDGE_FN2) {
+        b2 |= 1 << 5;
+    }
+    if b.contains(DualSenseButtons::EDGE_PADDLE_L) {
+        b2 |= 1 << 6;
+    }
+    if b.contains(DualSenseButtons::EDGE_PADDLE_R) {
+        b2 |= 1 << 7;
+    }
+
+    payload[7] = b0;
+    payload[8] = b1;
+    payload[9] = b2;
+
+    payload[15..17].copy_from_slice(&state.gyro[0].to_le_bytes());
+    payload[17..19].copy_from_slice(&state.gyro[1].to_le_bytes());
+    payload[19..21].copy_from_slice(&state.gyro[2].to_le_bytes());
+    payload[21..23].copy_from_slice(&state.accel[0].to_le_bytes());
+    payload[23..25].copy_from_slice(&state.accel[1].to_le_bytes());
+    payload[25..27].copy_from_slice(&state.accel[2].to_le_bytes());
+    payload[27..31].copy_from_slice(&state.sensor_timestamp.to_le_bytes());
+
+    encode_touch_point(state.touch[0], &mut payload[32..36]);
+    encode_touch_point(state.touch[1], &mut payload[36..40]);
+    payload[40] = state.seq_number;
+
+    let battery_level = (state.battery_percent / 10).min(10);
+    let status0 = match state.battery_status {
+        BatteryStatus::Discharging => battery_level,
+        BatteryStatus::Charging => (0x1 << 4) | battery_level,
+        BatteryStatus::Full => (0x2 << 4) | 10,
+        BatteryStatus::TempOrVoltageError => 0xA << 4,
+        BatteryStatus::Unknown => 0xF << 4,
+    };
+    let mut status1: u8 = 0;
+    if state.headphone_connected {
+        status1 |= 0x01;
+    }
+    if state.mic_connected {
+        status1 |= 0x02;
+    }
+    if state.mic_muted_hw {
+        status1 |= 0x04;
+    }
+    payload[52] = status0;
+    payload[53] = status1;
+}
+
 /// Parses a raw DualSense USB (`0x01`) or Bluetooth (`0x31`) HID input report with zero allocations.
 #[inline]
 pub fn parse_input_report(
@@ -367,5 +496,65 @@ mod tests {
             parse_input_report(&pkt, Transport::Bluetooth, false),
             Err(ProtocolError::InvalidCrc { .. })
         ));
+    }
+
+    #[test]
+    fn usb_input_report_round_trip() {
+        let original = RawInputState {
+            left_x: 12,
+            left_y: 244,
+            right_x: 128,
+            right_y: 64,
+            l2_analog: 185,
+            r2_analog: 255,
+            seq_number: 99,
+            dpad: DPad::SouthWest,
+            buttons: DualSenseButtons::SQUARE
+                | DualSenseButtons::TRIANGLE
+                | DualSenseButtons::R1
+                | DualSenseButtons::L2_DIGITAL
+                | DualSenseButtons::CREATE
+                | DualSenseButtons::L3
+                | DualSenseButtons::PS_HOME
+                | DualSenseButtons::TOUCHPAD
+                | DualSenseButtons::MIC_MUTE
+                | DualSenseButtons::EDGE_FN1
+                | DualSenseButtons::EDGE_PADDLE_L,
+            gyro: [-1234, 5678, -90],
+            accel: [1024, -2048, 8192],
+            sensor_timestamp: 0x1234_5678,
+            touch: [
+                TouchPoint {
+                    active: true,
+                    id: 17,
+                    x: 1919,
+                    y: 1079,
+                },
+                TouchPoint {
+                    active: false,
+                    id: 4,
+                    x: 320,
+                    y: 240,
+                },
+            ],
+            battery_percent: 75,
+            battery_status: BatteryStatus::Charging,
+            headphone_connected: true,
+            mic_connected: true,
+            mic_muted_hw: false,
+        };
+
+        let mut buf = [0xAAu8; DS_INPUT_REPORT_USB_SIZE];
+        encode_usb_input_report(&original, &mut buf);
+        assert_eq!(buf[0], DS_INPUT_REPORT_USB);
+        assert_eq!(buf[41], original.seq_number);
+
+        let parsed = parse_input_report(&buf, Transport::Usb, true).unwrap();
+        assert_eq!(parsed, original);
+
+        // Also verify standard DualSense (non-Edge) masks out Edge-only bits cleanly.
+        let parsed_std = parse_input_report(&buf, Transport::Usb, false).unwrap();
+        assert!(!parsed_std.buttons.contains(DualSenseButtons::EDGE_FN1));
+        assert!(parsed_std.buttons.contains(DualSenseButtons::MIC_MUTE));
     }
 }

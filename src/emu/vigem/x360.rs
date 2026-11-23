@@ -139,9 +139,8 @@ impl VirtualController for Xbox360Target {
             return None;
         }
         Some(FeedbackState {
-            large_motor: (packed & 0xFF) as u8,
-            small_motor: ((packed >> 8) & 0xFF) as u8,
-            lightbar_rgb: None,
+            rumble: Some(((packed & 0xFF) as u8, ((packed >> 8) & 0xFF) as u8)),
+            ..Default::default()
         })
     }
 }

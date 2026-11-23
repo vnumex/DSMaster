@@ -210,6 +210,7 @@ mod tests {
             right_y: 128,
             l2_analog: 180,
             r2_analog: 255,
+            seq_number: 1,
             dpad: DPad::NorthWest,
             buttons: DualSenseButtons::CROSS
                 | DualSenseButtons::L1
@@ -236,6 +237,9 @@ mod tests {
             ],
             battery_percent: 80,
             battery_status: BatteryStatus::Discharging,
+            headphone_connected: false,
+            mic_connected: false,
+            mic_muted_hw: false,
         }
     }
 

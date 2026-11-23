@@ -17,6 +17,9 @@ pub enum AdaptiveTriggerEffect {
         amplitude: u8,
         frequency: u8,
     },
+    /// Lossless raw 11-byte DualSense adaptive trigger payload (e.g. forwarded from a game).
+    #[allow(dead_code)]
+    Raw([u8; 11]),
 }
 
 impl AdaptiveTriggerEffect {
@@ -25,6 +28,7 @@ impl AdaptiveTriggerEffect {
     pub fn encode(&self) -> [u8; 11] {
         let mut out = [0u8; 11];
         match *self {
+            Self::Raw(raw) => return raw,
             Self::Off => {
                 out[0] = 0x05;
             }
@@ -122,5 +126,7 @@ mod tests {
             .encode()[0],
             0x26
         );
+        let raw = [0x22, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+        assert_eq!(AdaptiveTriggerEffect::Raw(raw).encode(), raw);
     }
 }

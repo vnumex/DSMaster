@@ -246,6 +246,65 @@ fn ioctl_set_bool(handle: HANDLE, code: u32, value: bool) -> Result<(), CloakErr
     Ok(())
 }
 
+/// Returns `true` if `instance_id` belongs to a virtual controller (ViGEm Xbox 360 / DS4,
+/// or DSMaster's own Virtual DualSense via static marker, dynamic registry, or virtual PnP
+/// parent bus) and MUST NEVER be added to HidHide's blacklist.
+pub fn is_virtual_device_instance(instance_id: &str) -> bool {
+    if instance_id.is_empty() {
+        return false;
+    }
+    let upper = instance_id.to_ascii_uppercase();
+    upper.contains("VID_045E")
+        || upper.contains("PID_05C4")
+        || crate::hid::enumerate::is_virtual_dualsense_instance(instance_id)
+}
+
+fn filter_cloakable_instance_ids(physical_instance_ids: &[String]) -> HashSet<String> {
+    physical_instance_ids
+        .iter()
+        .filter(|id| !id.is_empty() && !is_virtual_device_instance(id))
+        .cloned()
+        .collect()
+}
+
+fn compute_next_blacklist_enabled(
+    current_blacklist: Vec<String>,
+    managed_ids: &HashSet<String>,
+    desired: &HashSet<String>,
+) -> Vec<String> {
+    let mut next_blacklist: Vec<String> = current_blacklist
+        .into_iter()
+        .filter(|id| {
+            // Actively strip any stale virtual DualSense entry if one somehow existed.
+            if crate::hid::enumerate::is_virtual_dualsense_instance(id) {
+                return false;
+            }
+            let was_managed = managed_ids.iter().any(|m| m.eq_ignore_ascii_case(id));
+            let still_desired = desired.iter().any(|d| d.eq_ignore_ascii_case(id));
+            !was_managed || still_desired
+        })
+        .collect();
+    for id in desired {
+        if !next_blacklist.iter().any(|x| x.eq_ignore_ascii_case(id)) {
+            next_blacklist.push(id.clone());
+        }
+    }
+    next_blacklist
+}
+
+fn compute_next_blacklist_disabled(
+    current_blacklist: Vec<String>,
+    managed_ids: &HashSet<String>,
+) -> Vec<String> {
+    current_blacklist
+        .into_iter()
+        .filter(|id| {
+            !crate::hid::enumerate::is_virtual_dualsense_instance(id)
+                && !managed_ids.iter().any(|m| m.eq_ignore_ascii_case(id))
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct CloakState {
     managed_ids: HashSet<String>,
@@ -289,25 +348,10 @@ impl HidHideManager {
                 }
             }
 
-            let desired: HashSet<String> = physical_instance_ids
-                .iter()
-                .filter(|id| {
-                    let upper = id.to_ascii_uppercase();
-                    !id.is_empty() && !upper.contains("VID_045E") && !upper.contains("PID_05C4")
-                })
-                .cloned()
-                .collect();
-
+            let desired = filter_cloakable_instance_ids(physical_instance_ids);
             let current_blacklist = ioctl_get_multi_sz(handle.0, IOCTL_GET_BLACKLIST)?;
-            let mut next_blacklist: Vec<String> = current_blacklist
-                .into_iter()
-                .filter(|id| !guard.managed_ids.contains(id) || desired.contains(id))
-                .collect();
-            for id in &desired {
-                if !next_blacklist.iter().any(|x| x.eq_ignore_ascii_case(id)) {
-                    next_blacklist.push(id.clone());
-                }
-            }
+            let next_blacklist =
+                compute_next_blacklist_enabled(current_blacklist, &guard.managed_ids, &desired);
             ioctl_set_multi_sz(handle.0, IOCTL_SET_BLACKLIST, &next_blacklist)?;
             guard.managed_ids = desired;
 
@@ -317,10 +361,8 @@ impl HidHideManager {
             }
         } else {
             let current_blacklist = ioctl_get_multi_sz(handle.0, IOCTL_GET_BLACKLIST)?;
-            let next_blacklist: Vec<String> = current_blacklist
-                .into_iter()
-                .filter(|id| !guard.managed_ids.contains(id))
-                .collect();
+            let next_blacklist =
+                compute_next_blacklist_disabled(current_blacklist, &guard.managed_ids);
             ioctl_set_multi_sz(handle.0, IOCTL_SET_BLACKLIST, &next_blacklist)?;
             guard.managed_ids.clear();
 
@@ -343,6 +385,7 @@ impl Drop for HidHideManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hid::enumerate::{register_virtual_serial, unregister_virtual_serial};
 
     #[test]
     fn multi_sz_round_trip() {
@@ -362,5 +405,88 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let nt = win32_path_to_nt_device_path(&exe).unwrap();
         assert!(nt.starts_with(r"\Device\"));
+    }
+
+    #[test]
+    fn physical_dualsense_is_allowed_to_be_cloaked() {
+        let usb = r"USB\VID_054C&PID_0CE6\8&11403F6E&7&0000";
+        let hid_usb = r"HID\VID_054C&PID_0CE6&MI_03\8&11403F6E&7&0000";
+        let bt = r"BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&0002054C_PID&0CE6\8&ABC&0&AABBCCDDEEFF_C00000000";
+
+        assert!(!is_virtual_device_instance(usb));
+        assert!(!is_virtual_device_instance(hid_usb));
+        assert!(!is_virtual_device_instance(bt));
+
+        let filtered =
+            filter_cloakable_instance_ids(&[usb.to_owned(), hid_usb.to_owned(), bt.to_owned()]);
+        assert!(filtered.contains(usb));
+        assert!(filtered.contains(hid_usb));
+        assert!(filtered.contains(bt));
+    }
+
+    #[test]
+    fn virtual_controllers_are_never_cloaked_and_stale_vds_is_stripped() {
+        let phys_usb = r"USB\VID_054C&PID_0CE6\8&11403F6E&7&0000";
+        let phys_bt = r"BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&0002054C_PID&0CE6\8&ABC";
+        let vigem_x360 = r"USB\VID_045E&PID_028E\1&1A590E2C&0&01";
+        let vigem_ds4 = r"HID\VID_054C&PID_05C4\1&1A590E2C&0&02";
+        let vds_serial = r"USB\VID_054C&PID_0CE6\DSMASTER-VDS-01";
+        let vds_usbip = r"USBIP\VID_054C&PID_0CE6\0001";
+        let vds_vhf = r"VHF\VID_054C&PID_0CE6\0001";
+
+        assert!(is_virtual_device_instance(vigem_x360));
+        assert!(is_virtual_device_instance(vigem_ds4));
+        assert!(is_virtual_device_instance(vds_serial));
+        assert!(is_virtual_device_instance(vds_usbip));
+        assert!(is_virtual_device_instance(vds_vhf));
+
+        let dyn_serial = "CLOAK-DYN-VDS-42";
+        let vds_dyn = r"USB\VID_054C&PID_0CE6\CLOAK-DYN-VDS-42";
+        register_virtual_serial(dyn_serial);
+        assert!(is_virtual_device_instance(vds_dyn));
+
+        let desired = filter_cloakable_instance_ids(&[
+            phys_usb.to_owned(),
+            phys_bt.to_owned(),
+            vigem_x360.to_owned(),
+            vigem_ds4.to_owned(),
+            vds_serial.to_owned(),
+            vds_usbip.to_owned(),
+            vds_vhf.to_owned(),
+            vds_dyn.to_owned(),
+        ]);
+        assert_eq!(desired.len(), 2);
+        assert!(desired.contains(phys_usb));
+        assert!(desired.contains(phys_bt));
+
+        // Even if a stale virtual DualSense entry was already present in HidHide's blacklist,
+        // syncing strips it while preserving unrelated third-party user rules.
+        let user_custom_rule = r"HID\VID_1234&PID_5678\USER_MANUAL";
+        let current = vec![
+            user_custom_rule.to_owned(),
+            vds_serial.to_owned(),
+            vds_usbip.to_owned(),
+            vds_dyn.to_owned(),
+        ];
+        let next = compute_next_blacklist_enabled(current, &HashSet::new(), &desired);
+        assert!(next.iter().any(|x| x == user_custom_rule));
+        assert!(next.iter().any(|x| x == phys_usb));
+        assert!(next.iter().any(|x| x == phys_bt));
+        assert!(!next.iter().any(|x| x == vds_serial));
+        assert!(!next.iter().any(|x| x == vds_usbip));
+        assert!(!next.iter().any(|x| x == vds_dyn));
+
+        // Disabling cloak also strips stale virtual DualSense entries and our managed IDs.
+        let after_disable = compute_next_blacklist_disabled(
+            vec![
+                user_custom_rule.to_owned(),
+                phys_usb.to_owned(),
+                vds_serial.to_owned(),
+            ],
+            &desired,
+        );
+        assert_eq!(after_disable, vec![user_custom_rule.to_owned()]);
+
+        unregister_virtual_serial(dyn_serial);
     }
 }

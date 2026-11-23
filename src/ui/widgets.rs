@@ -3,18 +3,20 @@ use std::rc::Rc;
 
 use gpui::{
     AnyView, App, Bounds, Context, Div, FontWeight, IntoElement, PathBuilder, Pixels, Render,
-    SharedString, Stateful, Window, canvas, div, point, prelude::*, px, relative,
+    SharedString, Stateful, Window, canvas, div, linear_color_stop, linear_gradient, point,
+    prelude::*, px, relative,
 };
 
 use super::icons::{check_icon, close_x_icon, info_icon};
 use super::theme::{
     ACCENT, ACCENT_FG, ACCENT_SOLID, ACCENT_SOLID_HOVER, BORDER, BORDER_STRONG, DANGER,
     DANGER_BORDER, DANGER_SURFACE, DANGER_SURFACE_HOVER, DRAWER_BG, FONT_MONO, FONT_SANS, RAIL_BG,
-    SUCCESS, SUCCESS_BORDER, SUCCESS_SURFACE, SUCCESS_SURFACE_HOVER, SURFACE, SURFACE_ALT,
-    SURFACE_HOVER, TEXT, TEXT_MUTED, TEXT_SECONDARY, WELL_BG, ZONE_SECONDARY, color, color_alpha,
-    overlay_shadow,
+    SUCCESS, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, TEXT_SECONDARY, WELL_BG,
+    ZONE_SECONDARY, color, color_alpha, hsv_to_rgb, overlay_shadow, rgb_to_u32,
 };
 use crate::engine::profile::StickTuning;
+
+pub const SLIDER_SLOTS: usize = 9;
 
 /// Flat dark surface card (`#222428`, 12px radius, 20px padding, 16px rhythm, 1px hairline)
 pub fn section_card(title: &'static str) -> Div {
@@ -30,6 +32,10 @@ pub fn section_card(title: &'static str) -> Div {
         .rounded(px(12.0))
         .child(
             div()
+                .flex_shrink_0()
+                .min_h(px(24.0))
+                .flex()
+                .items_center()
                 .text_base()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(color(TEXT))
@@ -50,6 +56,8 @@ pub fn section_card_with_action(title: &'static str, action: impl IntoElement) -
         .rounded(px(12.0))
         .child(
             div()
+                .flex_shrink_0()
+                .min_h(px(24.0))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -310,38 +318,6 @@ pub fn primary_cta_button(
         .child(label.into())
 }
 
-/// Active protection CTA button (toned flat emerald surface, quiet border)
-pub fn active_status_cta(
-    id: impl Into<SharedString>,
-    icon: Div,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .h(px(36.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .px_4()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(color(SUCCESS_BORDER))
-        .bg(color(SUCCESS_SURFACE))
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .whitespace_nowrap()
-        .flex_shrink_0()
-        .text_color(color(SUCCESS))
-        .cursor_pointer()
-        .hover(|s| {
-            s.bg(color(SUCCESS_SURFACE_HOVER))
-                .border_color(color(SUCCESS))
-        })
-        .child(icon)
-        .child(label.into())
-}
-
 /// Far-left 72px icon rail item (quiet neutral selection, icons match text role)
 pub fn icon_rail_item(
     id: impl Into<SharedString>,
@@ -532,6 +508,15 @@ pub fn driver_status_pill(installed: bool) -> Div {
 }
 
 pub fn meter_row(label: &'static str, value: u8, bar_color: u32) -> Div {
+    meter_row_with_width(label, 88.0, value, bar_color)
+}
+
+pub fn meter_row_with_width(
+    label: &'static str,
+    label_w: f32,
+    value: u8,
+    bar_color: u32,
+) -> Div {
     let pct = value as f32 / 255.0;
     div()
         .flex()
@@ -539,7 +524,7 @@ pub fn meter_row(label: &'static str, value: u8, bar_color: u32) -> Div {
         .gap_3()
         .child(
             div()
-                .w(px(88.0))
+                .w(px(label_w))
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .text_size(px(13.0))
@@ -565,7 +550,7 @@ pub fn meter_row(label: &'static str, value: u8, bar_color: u32) -> Div {
         )
         .child(
             div()
-                .w(px(40.0))
+                .w(px(36.0))
                 .text_right()
                 .text_size(px(13.0))
                 .font_family(FONT_MONO)
@@ -1136,7 +1121,7 @@ pub fn slider_bar(
     fill_ratio: f32,
     fill_color: u32,
     bounds_slot: usize,
-    bounds_store: Rc<RefCell<[Bounds<Pixels>; 5]>>,
+    bounds_store: Rc<RefCell<[Bounds<Pixels>; SLIDER_SLOTS]>>,
 ) -> Div {
     let clamped = fill_ratio.clamp(0.0, 1.0);
     div()
@@ -1220,6 +1205,220 @@ pub fn slider_bar(
                         .bg(color(fill_color))
                         .border_2()
                         .border_color(color(WELL_BG)),
+                ),
+        )
+}
+
+/// Interactive 2D HSV Saturation (X) × Brightness/Value (Y) color picker pad
+pub fn sv_color_pad(
+    hue: f32,
+    sat: f32,
+    val: f32,
+    current_hex: u32,
+    bounds_store: Rc<RefCell<Bounds<Pixels>>>,
+) -> Div {
+    let pure_hue_hex = rgb_to_u32(hsv_to_rgb(hue, 1.0, 1.0));
+    let s = sat.clamp(0.0, 1.0);
+    let v = val.clamp(0.0, 1.0);
+
+    div()
+        .relative()
+        .w(px(192.0))
+        .h(px(148.0))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(color(BORDER_STRONG))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(linear_gradient(
+                            90.0,
+                            linear_color_stop(color(0xFFFFFF), 0.0),
+                            linear_color_stop(color(pure_hue_hex), 1.0),
+                        )),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(color_alpha(0x000000, 0x00), 0.0),
+                            linear_color_stop(color_alpha(0x000000, 0xFF), 1.0),
+                        )),
+                ),
+        )
+        .child(
+            div().absolute().inset_0().child(
+                canvas(
+                    move |bounds, _, _| {
+                        *bounds_store.borrow_mut() = bounds;
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(relative(s))
+                .top(relative(1.0 - v))
+                .ml(px(-7.0))
+                .mt(px(-7.0))
+                .size(px(14.0))
+                .rounded_full()
+                .bg(color(current_hex))
+                .border_2()
+                .border_color(color(0xFFFFFF))
+                .shadow(overlay_shadow()),
+        )
+}
+
+/// Interactive full-spectrum 0–360° Hue bar with draggable circular thumb
+pub fn hue_slider_bar(
+    hue: f32,
+    bounds_slot: usize,
+    bounds_store: Rc<RefCell<[Bounds<Pixels>; SLIDER_SLOTS]>>,
+) -> Div {
+    let ratio = (hue.rem_euclid(360.0) / 360.0).clamp(0.0, 1.0);
+    let thumb_hex = rgb_to_u32(hsv_to_rgb(hue, 1.0, 1.0));
+    let segments: [(u32, u32); 6] = [
+        (0xFF0000, 0xFFFF00),
+        (0xFFFF00, 0x00FF00),
+        (0x00FF00, 0x00FFFF),
+        (0x00FFFF, 0x0000FF),
+        (0x0000FF, 0xFF00FF),
+        (0xFF00FF, 0xFF0000),
+    ];
+
+    let mut spectrum = div()
+        .w_full()
+        .h(px(10.0))
+        .rounded_full()
+        .border_1()
+        .border_color(color(BORDER_STRONG))
+        .overflow_hidden()
+        .flex();
+    for (c0, c1) in segments {
+        spectrum = spectrum.child(div().flex_1().h_full().bg(linear_gradient(
+            90.0,
+            linear_color_stop(color(c0), 0.0),
+            linear_color_stop(color(c1), 1.0),
+        )));
+    }
+
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .w_full()
+        .h(px(20.0))
+        .cursor_pointer()
+        .child(
+            div().absolute().inset_0().child(
+                canvas(
+                    move |bounds, _, _| {
+                        bounds_store.borrow_mut()[bounds_slot] = bounds;
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            ),
+        )
+        .child(spectrum)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(7.0))
+                .right(px(7.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(ratio))
+                        .ml(px(-7.0))
+                        .size(px(14.0))
+                        .rounded_full()
+                        .bg(color(thumb_hex))
+                        .border_2()
+                        .border_color(color(0xFFFFFF)),
+                ),
+        )
+}
+
+/// Interactive single-channel RGB gradient bar (shows exact live color sweep 0..255)
+pub fn rgb_channel_bar(
+    min_hex: u32,
+    max_hex: u32,
+    fill_ratio: f32,
+    thumb_hex: u32,
+    bounds_slot: usize,
+    bounds_store: Rc<RefCell<[Bounds<Pixels>; SLIDER_SLOTS]>>,
+) -> Div {
+    let ratio = fill_ratio.clamp(0.0, 1.0);
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .flex_1()
+        .h(px(20.0))
+        .cursor_pointer()
+        .child(
+            div().absolute().inset_0().child(
+                canvas(
+                    move |bounds, _, _| {
+                        bounds_store.borrow_mut()[bounds_slot] = bounds;
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            ),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(8.0))
+                .rounded_full()
+                .border_1()
+                .border_color(color(BORDER_STRONG))
+                .overflow_hidden()
+                .bg(linear_gradient(
+                    90.0,
+                    linear_color_stop(color(min_hex), 0.0),
+                    linear_color_stop(color(max_hex), 1.0),
+                )),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(7.0))
+                .right(px(7.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(ratio))
+                        .ml(px(-7.0))
+                        .size(px(14.0))
+                        .rounded_full()
+                        .bg(color(thumb_hex))
+                        .border_2()
+                        .border_color(color(0xFFFFFF)),
                 ),
         )
 }

@@ -43,6 +43,7 @@ const ID_TOGGLE_SHOW: usize = 1001;
 const ID_EMU_NONE: usize = 1002;
 const ID_EMU_X360: usize = 1003;
 const ID_EMU_DS4: usize = 1004;
+const ID_EMU_DS5: usize = 1007;
 const ID_TOGGLE_CLOAK: usize = 1005;
 const ID_QUIT: usize = 1006;
 
@@ -118,6 +119,7 @@ impl TrayState {
             EmulationMode::None => "Passthrough",
             EmulationMode::Xbox360 => "Xbox 360",
             EmulationMode::DualShock4 => "DualShock 4",
+            EmulationMode::DualSense => "DualSense",
         };
         let raw = if self.connected_count == 0 {
             format!("DSMaster - {mode} (Idle)")
@@ -420,6 +422,7 @@ fn show_context_menu(hwnd: HWND, ctx: &TrayWindowCtx) {
     let mode_none = to_wide_null("Mode: Off (Passthrough)");
     let mode_x360 = to_wide_null("Mode: Xbox 360");
     let mode_ds4 = to_wide_null("Mode: DualShock 4");
+    let mode_ds5 = to_wide_null("Mode: DualSense");
     let cloak_label = to_wide_null("Cloak Physical Controller");
     let quit_label = to_wide_null("Quit DSMaster");
 
@@ -457,6 +460,12 @@ fn show_context_menu(hwnd: HWND, ctx: &TrayWindowCtx) {
             MF_STRING | check_flag(snapshot.emulation == EmulationMode::DualShock4),
             ID_EMU_DS4,
             PCWSTR(mode_ds4.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING | check_flag(snapshot.emulation == EmulationMode::DualSense),
+            ID_EMU_DS5,
+            PCWSTR(mode_ds5.as_ptr()),
         );
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(
@@ -497,6 +506,7 @@ fn show_context_menu(hwnd: HWND, ctx: &TrayWindowCtx) {
         ID_EMU_NONE => Some(TrayAction::SetEmulation(EmulationMode::None)),
         ID_EMU_X360 => Some(TrayAction::SetEmulation(EmulationMode::Xbox360)),
         ID_EMU_DS4 => Some(TrayAction::SetEmulation(EmulationMode::DualShock4)),
+        ID_EMU_DS5 => Some(TrayAction::SetEmulation(EmulationMode::DualSense)),
         ID_TOGGLE_CLOAK => Some(TrayAction::ToggleCloak),
         ID_QUIT => Some(TrayAction::Quit),
         _ => None,

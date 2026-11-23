@@ -129,6 +129,95 @@ pub fn encode_output_report(
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ParsedOutputReport {
+    /// Rumble motor intensities as `(large_left, small_right)`.
+    pub rumble: Option<(u8, u8)>,
+    pub lightbar_rgb: Option<[u8; 3]>,
+    pub player_leds: Option<u8>,
+    pub left_trigger_raw: Option<[u8; 11]>,
+    pub right_trigger_raw: Option<[u8; 11]>,
+}
+
+/// Parses an incoming DualSense USB HID Output Report (`0x02`, >= 48 bytes) into
+/// per-subsystem feedback fields according to `valid_flag0` (`data[1]`) and `valid_flag1` (`data[2]`).
+///
+/// Exact USB report layout (including Report ID `0x02` at `data[0]`, matching `write_common_payload` on `&mut out[1..48]`):
+/// - `data[1]` (`c[0]`): `valid_flag0` (`0x01|0x02` rumble, `0x04` R2 trigger, `0x08` L2 trigger)
+/// - `data[2]` (`c[1]`): `valid_flag1` (`0x04` lightbar RGB, `0x10` player LEDs)
+/// - `data[3]` (`c[2]`): `motor_right` (small/high-frequency motor)
+/// - `data[4]` (`c[3]`): `motor_left` (large/low-frequency motor)
+/// - `data[11..22]` (`c[10..21]`): right adaptive trigger (11 bytes)
+/// - `data[22..33]` (`c[21..32]`): left adaptive trigger (11 bytes)
+/// - `data[44]` (`c[43]`): player LEDs (low 5 bits `0x1F`)
+/// - `data[45..48]` (`c[44..47]`): lightbar `[R, G, B]`
+#[allow(dead_code)]
+#[inline]
+pub fn parse_usb_output_report(data: &[u8]) -> Result<ParsedOutputReport, ProtocolError> {
+    if data.is_empty() {
+        return Err(ProtocolError::ReportTooShort {
+            expected: DS_OUTPUT_REPORT_USB_MIN_SIZE,
+            actual: 0,
+        });
+    }
+    if data[0] != DS_OUTPUT_REPORT_USB {
+        return Err(ProtocolError::UnexpectedReportId(data[0]));
+    }
+    if data.len() < DS_OUTPUT_REPORT_USB_MIN_SIZE {
+        return Err(ProtocolError::ReportTooShort {
+            expected: DS_OUTPUT_REPORT_USB_MIN_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let c = &data[1..DS_OUTPUT_REPORT_USB_MIN_SIZE];
+    let flag0 = c[0];
+    let flag1 = c[1];
+
+    let rumble = if (flag0 & (0x01 | 0x02)) != 0 {
+        Some((c[3], c[2]))
+    } else {
+        None
+    };
+
+    let right_trigger_raw = if (flag0 & 0x04) != 0 {
+        let mut raw = [0u8; 11];
+        raw.copy_from_slice(&c[10..21]);
+        Some(raw)
+    } else {
+        None
+    };
+
+    let left_trigger_raw = if (flag0 & 0x08) != 0 {
+        let mut raw = [0u8; 11];
+        raw.copy_from_slice(&c[21..32]);
+        Some(raw)
+    } else {
+        None
+    };
+
+    let player_leds = if (flag1 & 0x10) != 0 {
+        Some(c[43] & 0x1F)
+    } else {
+        None
+    };
+
+    let lightbar_rgb = if (flag1 & 0x04) != 0 {
+        Some([c[44], c[45], c[46]])
+    } else {
+        None
+    };
+
+    Ok(ParsedOutputReport {
+        rumble,
+        lightbar_rgb,
+        player_leds,
+        left_trigger_raw,
+        right_trigger_raw,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +296,94 @@ mod tests {
         assert_eq!(bt[41] & 0x02, 0);
         assert_eq!(bt[5], 80);
         assert_eq!(bt[6], 150);
+    }
+
+    #[test]
+    fn usb_output_report_round_trip_full() {
+        let left_trig = AdaptiveTriggerEffect::Weapon {
+            start_position: 2,
+            end_position: 6,
+            strength: 7,
+        };
+        let right_trig = AdaptiveTriggerEffect::Vibration {
+            position: 1,
+            amplitude: 5,
+            frequency: 35,
+        };
+        let state = OutputState {
+            update_rumble: true,
+            motor_left: 210,
+            motor_right: 95,
+            update_lightbar: true,
+            lightbar_rgb: [12, 180, 255],
+            update_player_leds: true,
+            player_leds: 0x15,
+            update_left_trigger: true,
+            left_trigger: left_trig,
+            update_right_trigger: true,
+            right_trigger: right_trig,
+            disable_led_fade: true,
+        };
+
+        let mut usb = [0u8; 64];
+        encode_output_report(&state, Transport::Usb, 0, &mut usb).unwrap();
+
+        let parsed = parse_usb_output_report(&usb).unwrap();
+        assert_eq!(parsed.rumble, Some((210, 95)));
+        assert_eq!(parsed.lightbar_rgb, Some([12, 180, 255]));
+        assert_eq!(parsed.player_leds, Some(0x15));
+        assert_eq!(parsed.left_trigger_raw, Some(left_trig.encode()));
+        assert_eq!(parsed.right_trigger_raw, Some(right_trig.encode()));
+    }
+
+    #[test]
+    fn usb_output_report_partial_flags_preserved() {
+        // Trigger-only update must NOT clobber rumble or lighting.
+        let trig_only = OutputState {
+            update_right_trigger: true,
+            right_trigger: AdaptiveTriggerEffect::Raw([
+                0x21, 0xFC, 0x03, 0x24, 0x49, 0x92, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]),
+            ..Default::default()
+        };
+        let mut usb = [0u8; 48];
+        encode_output_report(&trig_only, Transport::Usb, 0, &mut usb).unwrap();
+
+        let parsed = parse_usb_output_report(&usb).unwrap();
+        assert_eq!(parsed.rumble, None);
+        assert_eq!(parsed.lightbar_rgb, None);
+        assert_eq!(parsed.player_leds, None);
+        assert_eq!(parsed.left_trigger_raw, None);
+        assert_eq!(
+            parsed.right_trigger_raw,
+            Some([0x21, 0xFC, 0x03, 0x24, 0x49, 0x92, 0x00, 0x00, 0x00, 0x00, 0x00])
+        );
+
+        // Rumble-only update must leave triggers/lightbar/LEDs as None.
+        let rumble_only = OutputState {
+            update_rumble: true,
+            motor_left: 0,
+            motor_right: 0,
+            ..Default::default()
+        };
+        encode_output_report(&rumble_only, Transport::Usb, 0, &mut usb).unwrap();
+        let parsed_r = parse_usb_output_report(&usb).unwrap();
+        assert_eq!(parsed_r.rumble, Some((0, 0)));
+        assert_eq!(parsed_r.lightbar_rgb, None);
+        assert_eq!(parsed_r.player_leds, None);
+        assert_eq!(parsed_r.left_trigger_raw, None);
+        assert_eq!(parsed_r.right_trigger_raw, None);
+
+        // Reject wrong report id and short buffers.
+        let mut bad_id = [0u8; 48];
+        bad_id[0] = 0x31;
+        assert_eq!(
+            parse_usb_output_report(&bad_id),
+            Err(ProtocolError::UnexpectedReportId(0x31))
+        );
+        assert!(matches!(
+            parse_usb_output_report(&[0x02; 16]),
+            Err(ProtocolError::ReportTooShort { expected: 48, actual: 16 })
+        ));
     }
 }
