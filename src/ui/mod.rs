@@ -1392,7 +1392,7 @@ impl DsMasterView {
             .unwrap_or(self.config.cloak_physical);
 
         let mut left_group = div().flex().items_center().gap_3().min_w(px(0.0));
-        if !self.drawer_open {
+        if !self.drawer_open && self.page.is_controller_section() {
             left_group = left_group.child(
                 div()
                     .id("drawer-expand")
@@ -4322,7 +4322,7 @@ impl Render for DsMasterView {
             .w_full()
             .child(icon_rail);
 
-        if self.drawer_open && self.page != ActivePage::Settings {
+        if self.drawer_open && self.page.is_controller_section() {
             workspace_row = workspace_row.child(self.render_config_drawer(cx));
         }
 
