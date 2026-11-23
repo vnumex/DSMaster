@@ -110,7 +110,7 @@ pub fn build_firmware_feature_20() -> [u8; FEATURE_REPORT_FIRMWARE_SIZE] {
     out[0] = FEATURE_REPORT_FIRMWARE_ID;
 
     // Clean-room ASCII build date (11 bytes, [1..12]) and build time (8 bytes, [12..20]).
-    out[1..12].copy_from_slice(b"Jan 01 2025");
+    out[1..12].copy_from_slice(b"Jan 01 2026");
     out[12..20].copy_from_slice(b"00:00:00");
 
     // fw_type (u16 LE) = 0x0002
@@ -119,10 +119,10 @@ pub fn build_firmware_feature_20() -> [u8; FEATURE_REPORT_FIRMWARE_SIZE] {
     out[22..24].copy_from_slice(&0x0000u16.to_le_bytes());
     // hw_info (u32 LE) = 0x0000_0414
     out[24..28].copy_from_slice(&0x0000_0414u32.to_le_bytes());
-    // main_fw_version (u32 LE) = 0x0004_0000
-    out[28..32].copy_from_slice(&0x0004_0000u32.to_le_bytes());
-    // update_version (u16 LE) = 0x0402
-    out[44..46].copy_from_slice(&0x0402u16.to_le_bytes());
+    // main_fw_version (u32 LE) = 0x0009_0000
+    out[28..32].copy_from_slice(&0x0009_0000u32.to_le_bytes());
+    // update_version (u16 LE) = 0x0900 (prevents Steam from prompting to update virtual firmware)
+    out[44..46].copy_from_slice(&0x0900u16.to_le_bytes());
 
     out
 }
@@ -178,11 +178,11 @@ mod tests {
         let rep = build_firmware_feature_20();
         assert_eq!(rep.len(), 64);
         assert_eq!(rep[0], 0x20);
-        assert_eq!(&rep[1..12], b"Jan 01 2025");
+        assert_eq!(&rep[1..12], b"Jan 01 2026");
         assert_eq!(&rep[12..20], b"00:00:00");
         assert_eq!(u16::from_le_bytes([rep[20], rep[21]]), 0x0002);
         assert_eq!(u32::from_le_bytes([rep[24], rep[25], rep[26], rep[27]]), 0x0000_0414);
-        assert_eq!(u32::from_le_bytes([rep[28], rep[29], rep[30], rep[31]]), 0x0004_0000);
-        assert_eq!(u16::from_le_bytes([rep[44], rep[45]]), 0x0402);
+        assert_eq!(u32::from_le_bytes([rep[28], rep[29], rep[30], rep[31]]), 0x0009_0000);
+        assert_eq!(u16::from_le_bytes([rep[44], rep[45]]), 0x0900);
     }
 }
