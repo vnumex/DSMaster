@@ -4,7 +4,7 @@ pub mod hotplug;
 
 use thiserror::Error;
 
-pub use device::{CancelHandle, DualSenseDevice, ReadOutcome};
+pub use device::{CancelHandle, DualSenseDevice, DualSenseWriteHandle, ReadOutcome};
 pub use enumerate::{DeviceInfo, enumerate_dualsense_devices, inspect_hid_path};
 pub use hotplug::{HotPlugEvent, HotPlugMonitor};
 

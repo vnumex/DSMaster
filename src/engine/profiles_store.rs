@@ -131,7 +131,7 @@ pub fn save_config(cfg: &AppConfig) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::emu::EmulationMode;
-    use crate::engine::profile::{ButtonPreset, TriggerPreset};
+    use crate::engine::profile::{ButtonMap, RemappableButton, TriggerPreset};
 
     #[test]
     fn toml_config_round_trip() {
@@ -139,13 +139,15 @@ mod tests {
             cloak_physical: true,
             ..Default::default()
         };
+        let mut button_map = ButtonMap::default();
+        button_map.swap(RemappableButton::Cross, RemappableButton::Circle);
         cfg.profiles.push(NamedProfile {
             name: "FPS".to_owned(),
             linked_exe: Some("apex.exe".to_owned()),
             settings: ControllerProfile {
                 emulation: EmulationMode::Xbox360,
                 right_trigger_preset: TriggerPreset::Weapon,
-                button_preset: ButtonPreset::Tactical,
+                button_map,
                 ..Default::default()
             },
         });

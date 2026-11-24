@@ -2,8 +2,10 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::protocol::{
-    DS_FEATURE_REPORT_CALIBRATION, DS_FEATURE_REPORT_CALIBRATION_SIZE, ImuCalibration,
-    parse_calibration_report,
+    DS_FEATURE_REPORT_CALIBRATION, DS_FEATURE_REPORT_CALIBRATION_SIZE, FEATURE_REPORT_FIRMWARE_ID,
+    FEATURE_REPORT_FIRMWARE_SIZE, FEATURE_REPORT_PAIRING_ID, FEATURE_REPORT_PAIRING_SIZE,
+    FirmwareInfo, ImuCalibration, parse_calibration_report, parse_firmware_feature_20,
+    parse_pairing_feature_09,
 };
 use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetFeature;
 use windows::Win32::Foundation::{
@@ -188,6 +190,42 @@ impl DualSenseDevice {
         }
     }
 
+    /// Queries Feature Report `0x09` (Bluetooth MAC / pairing address), returning `None` if unsupported.
+    pub fn read_feature_pairing_mac(&self) -> Option<[u8; 6]> {
+        let len = self.info.feature_report_len.max(FEATURE_REPORT_PAIRING_SIZE);
+        let mut buf = vec![0u8; len];
+        buf[0] = FEATURE_REPORT_PAIRING_ID;
+        let ok = unsafe {
+            HidD_GetFeature(
+                self.handle,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                len as u32,
+            )
+        };
+        if !ok {
+            return None;
+        }
+        parse_pairing_feature_09(&buf)
+    }
+
+    /// Queries Feature Report `0x20` (firmware & hardware info), returning `None` if unsupported.
+    pub fn read_feature_firmware_info(&self) -> Option<FirmwareInfo> {
+        let len = self.info.feature_report_len.max(FEATURE_REPORT_FIRMWARE_SIZE);
+        let mut buf = vec![0u8; len];
+        buf[0] = FEATURE_REPORT_FIRMWARE_ID;
+        let ok = unsafe {
+            HidD_GetFeature(
+                self.handle,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                len as u32,
+            )
+        };
+        if !ok {
+            return None;
+        }
+        parse_firmware_feature_20(&buf)
+    }
+
     /// Reads one HID input report using overlapped I/O with zero heap allocations.
     #[inline]
     pub fn read_report(&mut self, timeout_ms: u32) -> Result<ReadOutcome<'_>, HidError> {
@@ -320,4 +358,106 @@ const fn is_disconnect_err(code: u32) -> bool {
     code == ERROR_DEVICE_NOT_CONNECTED.0
         || code == ERROR_GEN_FAILURE.0
         || code == ERROR_INVALID_HANDLE.0
+}
+
+/// Dedicated write-only overlapped HID handle for asynchronous Bluetooth audio/haptics streaming.
+pub struct DualSenseWriteHandle {
+    handle: HANDLE,
+    write_event: OwnedEvent,
+    write_ov: Box<OVERLAPPED>,
+    write_buf: Box<[u8]>,
+}
+
+unsafe impl Send for DualSenseWriteHandle {}
+
+impl DualSenseWriteHandle {
+    pub fn open(device_path: &str, output_report_len: usize) -> Result<Self, HidError> {
+        if output_report_len == 0 || output_report_len > 4096 {
+            return Err(HidError::ReportSizeOutOfBounds {
+                input: 0,
+                output: output_report_len,
+            });
+        }
+        let path_w = to_wide_null(device_path);
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(path_w.as_ptr()),
+                FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .map_err(|e| HidError::Win32("CreateFileW(WriteHandle)", e.code().0 as u32))?;
+
+        let write_event = OwnedEvent::new_manual_reset()?;
+        let write_buf = vec![0u8; output_report_len].into_boxed_slice();
+        Ok(Self {
+            handle,
+            write_event,
+            write_ov: Box::new(OVERLAPPED::default()),
+            write_buf,
+        })
+    }
+
+    #[inline]
+    pub fn write_buf_mut(&mut self) -> &mut [u8] {
+        &mut self.write_buf
+    }
+
+    #[inline]
+    pub fn write_report(&mut self, timeout_ms: u32) -> Result<(), HidError> {
+        unsafe {
+            let _ = ResetEvent(self.write_event.raw());
+        }
+        *self.write_ov = OVERLAPPED {
+            hEvent: self.write_event.raw(),
+            ..Default::default()
+        };
+
+        let mut bytes_written = 0u32;
+        let res = unsafe {
+            WriteFile(
+                self.handle,
+                Some(&self.write_buf[..]),
+                Some(&mut bytes_written),
+                Some(&mut *self.write_ov),
+            )
+        };
+
+        if res.is_ok() {
+            return Ok(());
+        }
+
+        let err = unsafe { GetLastError() };
+        if err != ERROR_IO_PENDING {
+            return Err(HidError::Os("WriteFile(WriteHandle)", err.0));
+        }
+
+        let wait = unsafe { WaitForSingleObject(self.write_event.raw(), timeout_ms) };
+        if wait == WAIT_OBJECT_0 {
+            let mut completed = 0u32;
+            unsafe { GetOverlappedResult(self.handle, &*self.write_ov, &mut completed, false) }
+                .map_err(|e| HidError::Win32("GetOverlappedResult(WriteHandle)", e.code().0 as u32))?;
+            Ok(())
+        } else {
+            unsafe {
+                let _ = CancelIoEx(self.handle, Some(&*self.write_ov));
+                let mut completed = 0u32;
+                let _ = GetOverlappedResult(self.handle, &*self.write_ov, &mut completed, true);
+            }
+            Err(HidError::Os("WaitForSingleObject(WriteHandle)", wait.0))
+        }
+    }
+}
+
+impl Drop for DualSenseWriteHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CancelIoEx(self.handle, None);
+            let _ = CloseHandle(self.handle);
+        }
+    }
 }

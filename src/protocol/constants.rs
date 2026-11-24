@@ -17,6 +17,21 @@ pub const DS_OUTPUT_REPORT_USB: u8 = 0x02;
 pub const DS_OUTPUT_REPORT_USB_MIN_SIZE: usize = 48;
 pub const DS_OUTPUT_REPORT_BT: u8 = 0x31;
 pub const DS_OUTPUT_REPORT_BT_SIZE: usize = 78;
+pub const DS_OUTPUT_REPORT_BT_HAPTICS: u8 = 0x32;
+pub const DS_OUTPUT_REPORT_BT_HAPTICS_SIZE: usize = 142;
+pub const DS_OUTPUT_REPORT_BT_AUDIO: u8 = 0x35;
+pub const DS_OUTPUT_REPORT_BT_AUDIO_SIZE: usize = 334;
+
+pub const DS_BT_AUDIO_SUBPKT_SESSION: u8 = 0x11;
+pub const DS_BT_AUDIO_SUBPKT_HAPTICS: u8 = 0x12;
+pub const DS_BT_AUDIO_SUBPKT_SPEAKER: u8 = 0x13;
+pub const DS_BT_AUDIO_SUBPKT_HEADSET: u8 = 0x16;
+pub const DS_BT_AUDIO_OPUS_BYTES: usize = 200;
+pub const DS_BT_MIC_OPUS_BYTES: usize = 71;
+pub const DS_BT_MIC_VOLUME_MAX: u8 = 0x40;
+pub const DS_BT_HAPTICS_PCM_BYTES: usize = 64;
+pub const DS_BT_AUDIO_BUFFER_LEN_DEFAULT: u8 = 48;
+pub const DS_BT_AUDIO_COMBINED_LANE_OFFSET: usize = 77;
 
 pub const DS_FEATURE_REPORT_CALIBRATION: u8 = 0x05;
 pub const DS_FEATURE_REPORT_CALIBRATION_SIZE: usize = 41;
@@ -57,6 +72,8 @@ pub enum ProtocolError {
         "bluetooth input report is in minimal 0x01 mode; query feature report 0x05 to activate 0x31"
     )]
     MinimalBluetoothReport,
+    #[error("bluetooth 0x31 report carries microphone Opus audio rather than controller state")]
+    BluetoothMicAudioPacket,
     #[error("invalid bluetooth CRC-32: expected 0x{expected:08X}, got 0x{actual:08X}")]
     InvalidCrc { expected: u32, actual: u32 },
 }

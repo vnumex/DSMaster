@@ -101,6 +101,48 @@ pub fn build_pairing_feature_09(virtual_mac: [u8; 6]) -> [u8; FEATURE_REPORT_PAI
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FirmwareInfo {
+    pub build_date: [u8; 11],
+    pub build_time: [u8; 8],
+    pub fw_type: u16,
+    pub hw_info: u32,
+    pub main_fw_version: u32,
+    pub update_version: u16,
+}
+
+/// Parses a 20-byte DualSense Pairing / MAC Address Feature Report (`0x09`).
+/// Returns `None` if the report ID mismatches, buffer is too short, or MAC is all zeros.
+pub fn parse_pairing_feature_09(buf: &[u8]) -> Option<[u8; 6]> {
+    if buf.len() < 7 || buf[0] != FEATURE_REPORT_PAIRING_ID {
+        return None;
+    }
+    let mac = [buf[6], buf[5], buf[4], buf[3], buf[2], buf[1]];
+    if mac == [0; 6] {
+        return None;
+    }
+    Some(mac)
+}
+
+/// Parses a 64-byte DualSense Firmware & Hardware Info Feature Report (`0x20`).
+pub fn parse_firmware_feature_20(buf: &[u8]) -> Option<FirmwareInfo> {
+    if buf.len() < 46 || buf[0] != FEATURE_REPORT_FIRMWARE_ID {
+        return None;
+    }
+    let mut build_date = [0u8; 11];
+    build_date.copy_from_slice(&buf[1..12]);
+    let mut build_time = [0u8; 8];
+    build_time.copy_from_slice(&buf[12..20]);
+    Some(FirmwareInfo {
+        build_date,
+        build_time,
+        fw_type: u16::from_le_bytes([buf[20], buf[21]]),
+        hw_info: u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]),
+        main_fw_version: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
+        update_version: u16::from_le_bytes([buf[44], buf[45]]),
+    })
+}
+
 /// Builds a 64-byte clean-room USB DualSense Firmware & Hardware Info Feature Report (`0x20`).
 ///
 /// Reports modern DualSense firmware metadata so host libraries (SDL, Steam Input, games)
@@ -184,5 +226,22 @@ mod tests {
         assert_eq!(u32::from_le_bytes([rep[24], rep[25], rep[26], rep[27]]), 0x0000_0414);
         assert_eq!(u32::from_le_bytes([rep[28], rep[29], rep[30], rep[31]]), 0x0009_0000);
         assert_eq!(u16::from_le_bytes([rep[44], rep[45]]), 0x0900);
+
+        let parsed_fw = parse_firmware_feature_20(&rep).unwrap();
+        assert_eq!(&parsed_fw.build_date, b"Jan 01 2026");
+        assert_eq!(&parsed_fw.build_time, b"00:00:00");
+        assert_eq!(parsed_fw.fw_type, 0x0002);
+        assert_eq!(parsed_fw.hw_info, 0x0000_0414);
+        assert_eq!(parsed_fw.main_fw_version, 0x0009_0000);
+        assert_eq!(parsed_fw.update_version, 0x0900);
+    }
+
+    #[test]
+    fn pairing_09_round_trip_and_zero_mac_rejection() {
+        let mac = [0xE8, 0x47, 0x3A, 0x3F, 0x84, 0x3C];
+        let rep = build_pairing_feature_09(mac);
+        assert_eq!(parse_pairing_feature_09(&rep), Some(mac));
+        let zero_rep = build_pairing_feature_09([0; 6]);
+        assert_eq!(parse_pairing_feature_09(&zero_rep), None);
     }
 }

@@ -1,3 +1,4 @@
+pub mod audio_device;
 pub mod dualsense;
 pub mod mapping;
 pub mod vigem;

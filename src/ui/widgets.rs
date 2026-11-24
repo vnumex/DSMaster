@@ -14,9 +14,9 @@ use super::theme::{
     SUCCESS, SURFACE, SURFACE_ALT, SURFACE_HOVER, TEXT, TEXT_MUTED, TEXT_SECONDARY, WELL_BG,
     ZONE_SECONDARY, color, color_alpha, hsv_to_rgb, overlay_shadow, rgb_to_u32,
 };
-use crate::engine::profile::StickTuning;
+use crate::engine::profile::{DeadzoneShape, StickTuning};
 
-pub const SLIDER_SLOTS: usize = 9;
+pub const SLIDER_SLOTS: usize = 28;
 
 /// Flat dark surface card (`#222428`, 12px radius, 20px padding, 16px rhythm, 1px hairline)
 pub fn section_card(title: &'static str) -> Div {
@@ -654,7 +654,23 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
                 .bg(color_alpha(BORDER_STRONG, 0x70)),
         );
 
-    if tuning.anti_deadzone > 0.001 {
+    if tuning.shape != DeadzoneShape::Passthrough && tuning.outer_deadzone > 0.005 {
+        let sat_frac = (1.0 - tuning.outer_deadzone.clamp(0.0, 0.40)).clamp(0.4, 1.0);
+        let d_outer = FIELD_PX * sat_frac;
+        let offset = (FIELD_PX - d_outer) * 0.5;
+        field = field.child(
+            div()
+                .absolute()
+                .left(px(offset))
+                .top(px(offset))
+                .size(px(d_outer))
+                .rounded_full()
+                .border_1()
+                .border_color(color_alpha(SUCCESS, 0x70)),
+        );
+    }
+
+    if tuning.shape != DeadzoneShape::Passthrough && tuning.anti_deadzone > 0.001 {
         let d_anti = (FIELD_PX * tuning.anti_deadzone.clamp(0.0, 0.45)).max(6.0);
         let offset = (FIELD_PX - d_anti) * 0.5;
         field = field.child(
@@ -670,7 +686,33 @@ pub fn deadzone_showcase(raw: [u8; 2], out: [u8; 2], tuning: StickTuning, connec
         );
     }
 
-    if tuning.deadzone > 0.001 {
+    if tuning.shape == DeadzoneShape::Axial && tuning.deadzone > 0.001 {
+        let band = (FIELD_PX * tuning.deadzone.clamp(0.0, 0.49)).max(6.0);
+        let offset = (FIELD_PX - band) * 0.5;
+        field = field
+            .child(
+                div()
+                    .absolute()
+                    .left(px(offset))
+                    .top(px(0.0))
+                    .w(px(band))
+                    .h(px(FIELD_PX))
+                    .border_x_1()
+                    .border_color(color_alpha(ACCENT, 0x80))
+                    .bg(color_alpha(ACCENT, 0x18)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(offset))
+                    .w(px(FIELD_PX))
+                    .h(px(band))
+                    .border_y_1()
+                    .border_color(color_alpha(ACCENT, 0x80))
+                    .bg(color_alpha(ACCENT, 0x18)),
+            );
+    } else if tuning.shape == DeadzoneShape::Radial && tuning.deadzone > 0.001 {
         let d_dz = (FIELD_PX * tuning.deadzone.clamp(0.0, 0.49)).max(6.0);
         let offset = (FIELD_PX - d_dz) * 0.5;
         field = field.child(
@@ -751,13 +793,18 @@ pub fn response_curve_chart(raw: [u8; 2], tuning: StickTuning) -> Div {
         .clamp(0.0, 1.0);
 
     let eval_output = move |x: f32| -> f32 {
-        let dz = tuning.deadzone.clamp(0.0, 0.9);
+        if tuning.shape == DeadzoneShape::Passthrough {
+            return x.clamp(0.0, 1.0);
+        }
+        let dz = tuning.deadzone.clamp(0.0, 0.49);
         if x <= dz {
             return 0.0;
         }
-        let norm = ((x - dz) / (1.0 - dz)).clamp(0.0, 1.0);
+        let outer = tuning.outer_deadzone.clamp(0.0, 0.40);
+        let span = (1.0 - dz - outer).max(0.05);
+        let norm = ((x - dz) / span).clamp(0.0, 1.0);
         let curved = tuning.curve.apply(norm);
-        let adz = tuning.anti_deadzone.clamp(0.0, 0.9);
+        let adz = tuning.anti_deadzone.clamp(0.0, 0.45);
         (adz + curved * (1.0 - adz)).clamp(0.0, 1.0)
     };
 
@@ -922,83 +969,6 @@ pub fn response_curve_chart(raw: [u8; 2], tuning: StickTuning) -> Div {
                         .text_color(color(TEXT_SECONDARY))
                         .child(tuning.curve.label()),
                 ),
-        )
-}
-
-/// Rolling processing-latency sparkline painted from SeqLock telemetry history (64px tall)
-pub fn latency_sparkline(samples: Vec<f32>, connected: bool) -> Div {
-    div()
-        .w_full()
-        .h(px(64.0))
-        .rounded(px(8.0))
-        .bg(color(WELL_BG))
-        .border_1()
-        .border_color(color(BORDER))
-        .overflow_hidden()
-        .child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _| {
-                    let ox = f32::from(bounds.origin.x) + 8.0;
-                    let oy = f32::from(bounds.origin.y) + 8.0;
-                    let w = (f32::from(bounds.size.width) - 16.0).max(10.0);
-                    let h = (f32::from(bounds.size.height) - 16.0).max(10.0);
-
-                    let mut grid = PathBuilder::stroke(px(1.0));
-                    for frac in [0.25, 0.5, 0.75] {
-                        let y = oy + h * frac;
-                        grid.move_to(point(px(ox), px(y)));
-                        grid.line_to(point(px(ox + w), px(y)));
-                    }
-                    if let Ok(p) = grid.build() {
-                        window.paint_path(p, color_alpha(BORDER_STRONG, 0x45));
-                    }
-
-                    if !connected || samples.len() < 2 {
-                        let mut flat = PathBuilder::stroke(px(1.5));
-                        flat.move_to(point(px(ox), px(oy + h * 0.75)));
-                        flat.line_to(point(px(ox + w), px(oy + h * 0.75)));
-                        if let Ok(p) = flat.build() {
-                            window.paint_path(p, color_alpha(TEXT_MUTED, 0x60));
-                        }
-                        return;
-                    }
-
-                    let max_val = samples
-                        .iter()
-                        .copied()
-                        .fold(25.0_f32, f32::max)
-                        .max(10.0);
-                    let n = samples.len();
-
-                    let mut area = PathBuilder::fill();
-                    let mut line = PathBuilder::stroke(px(2.0));
-                    for (idx, &val) in samples.iter().enumerate() {
-                        let u = idx as f32 / (n - 1) as f32;
-                        let v = (val / max_val).clamp(0.0, 1.0);
-                        let x = ox + u * w;
-                        let y = oy + (1.0 - v * 0.88) * h;
-                        if idx == 0 {
-                            area.move_to(point(px(x), px(oy + h)));
-                            area.line_to(point(px(x), px(y)));
-                            line.move_to(point(px(x), px(y)));
-                        } else {
-                            area.line_to(point(px(x), px(y)));
-                            line.line_to(point(px(x), px(y)));
-                        }
-                    }
-                    area.line_to(point(px(ox + w), px(oy + h)));
-                    area.close();
-
-                    if let Ok(p) = area.build() {
-                        window.paint_path(p, color_alpha(ACCENT, 0x18));
-                    }
-                    if let Ok(p) = line.build() {
-                        window.paint_path(p, color(ACCENT));
-                    }
-                },
-            )
-            .size_full(),
         )
 }
 
@@ -1455,6 +1425,38 @@ pub fn text_tooltip(
         let text = text.clone();
         cx.new(|_| TextTooltip { text }).into()
     }
+}
+
+/// Compact key-value tile for the Device Info diagnostics grid
+pub fn info_kv_tile(label: &'static str, value: impl Into<SharedString>, mono: bool) -> Div {
+    let mut val_el = div()
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color(TEXT))
+        .whitespace_nowrap()
+        .child(value.into());
+    if mono {
+        val_el = val_el.font_family(FONT_MONO);
+    }
+    div()
+        .flex_1()
+        .min_w(px(180.0))
+        .px_3()
+        .py_2()
+        .rounded(px(8.0))
+        .bg(color(WELL_BG))
+        .border_1()
+        .border_color(color(BORDER))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(color(TEXT_MUTED))
+                .child(label),
+        )
+        .child(val_el)
 }
 
 #[cfg(test)]

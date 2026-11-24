@@ -1,19 +1,128 @@
+use serde::{Deserialize, Serialize};
+
 use super::constants::{
-    DS_OUTPUT_REPORT_BT, DS_OUTPUT_REPORT_BT_SIZE, DS_OUTPUT_REPORT_USB,
-    DS_OUTPUT_REPORT_USB_MIN_SIZE, DS_OUTPUT_TAG, PS_OUTPUT_CRC32_SEED, ProtocolError, Transport,
-    crc32_with_seed,
+    DS_BT_AUDIO_SUBPKT_HEADSET, DS_BT_AUDIO_SUBPKT_SPEAKER, DS_OUTPUT_REPORT_BT,
+    DS_OUTPUT_REPORT_BT_SIZE, DS_OUTPUT_REPORT_USB, DS_OUTPUT_REPORT_USB_MIN_SIZE, DS_OUTPUT_TAG,
+    PS_OUTPUT_CRC32_SEED, ProtocolError, Transport, crc32_with_seed,
 };
 use super::triggers::AdaptiveTriggerEffect;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MicMuteLed {
+    #[default]
+    Off = 0,
+    Solid = 1,
+    Pulse = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum LedBrightness {
+    #[default]
+    High = 0,
+    Medium = 1,
+    Low = 2,
+}
+
+impl LedBrightness {
+    pub const ALL: [Self; 3] = [Self::High, Self::Medium, Self::Low];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::High => "High",
+            Self::Medium => "Medium",
+            Self::Low => "Low",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BtAudioRoute {
+    #[default]
+    Speaker,
+    Headphones,
+    Both,
+}
+
+impl BtAudioRoute {
+    pub const ALL: [Self; 3] = [Self::Speaker, Self::Headphones, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Speaker => "Speaker",
+            Self::Headphones => "Headphones",
+            Self::Both => "Both",
+        }
+    }
+
+    #[inline]
+    pub fn audio_control_byte(self) -> u8 {
+        match self {
+            Self::Speaker => 0x30,
+            Self::Headphones => 0x00,
+            Self::Both => 0x20,
+        }
+    }
+
+    #[inline]
+    pub fn bt_lane_pid(self) -> u8 {
+        match self {
+            Self::Speaker => DS_BT_AUDIO_SUBPKT_SPEAKER,
+            Self::Headphones | Self::Both => DS_BT_AUDIO_SUBPKT_HEADSET,
+        }
+    }
+
+    #[inline]
+    pub fn needs_mono_fold(self) -> bool {
+        matches!(self, Self::Speaker | Self::Both)
+    }
+}
+
+/// Maps normalized `[0.0, 1.0]` speaker volume to Sony's hardware speaker gain window (`0x3D..=0x64`, or `0x00` when muted).
+#[inline]
+pub fn scale_speaker_volume(vol: f32) -> u8 {
+    let v = vol.clamp(0.0, 1.0);
+    if v <= 0.001 {
+        0x00
+    } else {
+        (0x3D as f32 + v * ((0x64 - 0x3D) as f32)).round() as u8
+    }
+}
+
+/// Maps normalized `[0.0, 1.0]` headphone volume to Sony's `scePad` headset gain window (`0x40..=0x7F`, or `0x00` when muted).
+#[inline]
+pub fn scale_headphone_volume(vol: f32) -> u8 {
+    let v = vol.clamp(0.0, 1.0);
+    if v <= 0.001 {
+        0x00
+    } else {
+        (0x40 as f32 + v * ((0x7F - 0x40) as f32)).round() as u8
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputState {
     pub update_rumble: bool,
     pub motor_left: u8,
     pub motor_right: u8,
+    pub update_headphone_volume: bool,
+    pub headphone_volume: u8,
+    pub update_speaker_volume: bool,
+    pub speaker_volume: u8,
+    pub update_mic_volume: bool,
+    pub mic_volume: u8,
+    pub update_audio_control: bool,
+    pub audio_control: u8,
+    pub unmute_audio: bool,
+    pub update_mic_mute_led: bool,
+    pub mic_mute_led: MicMuteLed,
     pub update_lightbar: bool,
     pub lightbar_rgb: [u8; 3],
     pub update_player_leds: bool,
     pub player_leds: u8,
+    pub update_led_brightness: bool,
+    pub led_brightness: LedBrightness,
     pub update_right_trigger: bool,
     pub right_trigger: AdaptiveTriggerEffect,
     pub update_left_trigger: bool,
@@ -27,10 +136,23 @@ impl Default for OutputState {
             update_rumble: false,
             motor_left: 0,
             motor_right: 0,
+            update_headphone_volume: false,
+            headphone_volume: 0,
+            update_speaker_volume: false,
+            speaker_volume: 0,
+            update_mic_volume: false,
+            mic_volume: 0,
+            update_audio_control: false,
+            audio_control: 0,
+            unmute_audio: false,
+            update_mic_mute_led: false,
+            mic_mute_led: MicMuteLed::Off,
             update_lightbar: false,
             lightbar_rgb: [0, 0, 64],
             update_player_leds: false,
             player_leds: 0x04,
+            update_led_brightness: false,
+            led_brightness: LedBrightness::High,
             update_right_trigger: false,
             right_trigger: AdaptiveTriggerEffect::Off,
             update_left_trigger: false,
@@ -53,6 +175,31 @@ fn write_common_payload(state: &OutputState, c: &mut [u8]) {
         c[3] = state.motor_left;
     }
 
+    if state.update_headphone_volume {
+        flag0 |= 0x10;
+        c[4] = state.headphone_volume.min(0x7F);
+    }
+
+    if state.update_speaker_volume {
+        flag0 |= 0x20;
+        c[5] = state.speaker_volume;
+    }
+
+    if state.update_mic_volume {
+        flag0 |= 0x40;
+        c[6] = state.mic_volume.min(0x40);
+    }
+
+    if state.update_audio_control {
+        flag0 |= 0x80;
+        c[7] = state.audio_control;
+    }
+
+    if state.unmute_audio {
+        flag1 |= 0x02;
+        c[9] = 0x00;
+    }
+
     if state.update_right_trigger {
         flag0 |= 0x04;
         c[10..21].copy_from_slice(&state.right_trigger.encode());
@@ -61,6 +208,11 @@ fn write_common_payload(state: &OutputState, c: &mut [u8]) {
     if state.update_left_trigger {
         flag0 |= 0x08;
         c[21..32].copy_from_slice(&state.left_trigger.encode());
+    }
+
+    if state.update_mic_mute_led {
+        flag1 |= 0x01;
+        c[8] = state.mic_mute_led as u8;
     }
 
     if state.update_lightbar {
@@ -78,6 +230,11 @@ fn write_common_payload(state: &OutputState, c: &mut [u8]) {
         flag1 |= 0x10;
         let fade_bit = if state.disable_led_fade { 0x20 } else { 0x00 };
         c[43] = (state.player_leds & 0x1F) | fade_bit;
+    }
+
+    if state.update_led_brightness {
+        flag2 |= 0x01;
+        c[42] = state.led_brightness as u8;
     }
 
     c[0] = flag0;
@@ -134,8 +291,10 @@ pub fn encode_output_report(
 pub struct ParsedOutputReport {
     /// Rumble motor intensities as `(large_left, small_right)`.
     pub rumble: Option<(u8, u8)>,
+    pub mic_mute_led: Option<u8>,
     pub lightbar_rgb: Option<[u8; 3]>,
     pub player_leds: Option<u8>,
+    pub led_brightness: Option<u8>,
     pub left_trigger_raw: Option<[u8; 11]>,
     pub right_trigger_raw: Option<[u8; 11]>,
 }
@@ -174,12 +333,15 @@ pub fn parse_usb_output_report(data: &[u8]) -> Result<ParsedOutputReport, Protoc
     let c = &data[1..DS_OUTPUT_REPORT_USB_MIN_SIZE];
     let flag0 = c[0];
     let flag1 = c[1];
+    let flag2 = c[38];
 
     let rumble = if (flag0 & (0x01 | 0x02)) != 0 {
         Some((c[3], c[2]))
     } else {
         None
     };
+
+    let mic_mute_led = if (flag1 & 0x01) != 0 { Some(c[8]) } else { None };
 
     let right_trigger_raw = if (flag0 & 0x04) != 0 {
         let mut raw = [0u8; 11];
@@ -203,6 +365,12 @@ pub fn parse_usb_output_report(data: &[u8]) -> Result<ParsedOutputReport, Protoc
         None
     };
 
+    let led_brightness = if (flag2 & 0x01) != 0 {
+        Some(c[42])
+    } else {
+        None
+    };
+
     let lightbar_rgb = if (flag1 & 0x04) != 0 {
         Some([c[44], c[45], c[46]])
     } else {
@@ -211,8 +379,10 @@ pub fn parse_usb_output_report(data: &[u8]) -> Result<ParsedOutputReport, Protoc
 
     Ok(ParsedOutputReport {
         rumble,
+        mic_mute_led,
         lightbar_rgb,
         player_leds,
+        led_brightness,
         left_trigger_raw,
         right_trigger_raw,
     })
@@ -314,15 +484,20 @@ mod tests {
             update_rumble: true,
             motor_left: 210,
             motor_right: 95,
+            update_mic_mute_led: true,
+            mic_mute_led: MicMuteLed::Pulse,
             update_lightbar: true,
             lightbar_rgb: [12, 180, 255],
             update_player_leds: true,
             player_leds: 0x15,
+            update_led_brightness: true,
+            led_brightness: LedBrightness::Low,
             update_left_trigger: true,
             left_trigger: left_trig,
             update_right_trigger: true,
             right_trigger: right_trig,
             disable_led_fade: true,
+            ..Default::default()
         };
 
         let mut usb = [0u8; 64];
@@ -330,8 +505,10 @@ mod tests {
 
         let parsed = parse_usb_output_report(&usb).unwrap();
         assert_eq!(parsed.rumble, Some((210, 95)));
+        assert_eq!(parsed.mic_mute_led, Some(MicMuteLed::Pulse as u8));
         assert_eq!(parsed.lightbar_rgb, Some([12, 180, 255]));
         assert_eq!(parsed.player_leds, Some(0x15));
+        assert_eq!(parsed.led_brightness, Some(LedBrightness::Low as u8));
         assert_eq!(parsed.left_trigger_raw, Some(left_trig.encode()));
         assert_eq!(parsed.right_trigger_raw, Some(right_trig.encode()));
     }
@@ -385,5 +562,33 @@ mod tests {
             parse_usb_output_report(&[0x02; 16]),
             Err(ProtocolError::ReportTooShort { expected: 48, actual: 16 })
         ));
+    }
+
+    #[test]
+    fn bt_0x31_audio_control_leaves_rumble_clear() {
+        let state = OutputState {
+            update_headphone_volume: true,
+            headphone_volume: scale_headphone_volume(1.0),
+            update_speaker_volume: true,
+            speaker_volume: scale_speaker_volume(1.0),
+            update_mic_volume: true,
+            mic_volume: 0x40,
+            update_audio_control: true,
+            audio_control: BtAudioRoute::Speaker.audio_control_byte(),
+            unmute_audio: true,
+            ..Default::default()
+        };
+
+        let mut bt = [0u8; 78];
+        encode_output_report(&state, Transport::Bluetooth, 2, &mut bt).unwrap();
+        // valid_flag0 at bt[3]: audio bits 0x10|0x20|0x40|0x80 = 0xF0, rumble bits 0x03 must stay 0.
+        assert_eq!(bt[3], 0xF0);
+        // valid_flag1 at bt[4]: AllowAudioMute 0x02.
+        assert_eq!(bt[4], 0x02);
+        assert_eq!(bt[7], 0x7F); // headphone_volume
+        assert_eq!(bt[8], 0x64); // speaker_volume
+        assert_eq!(bt[9], 0x40); // mic_volume
+        assert_eq!(bt[10], 0x30); // audio_control (speaker only)
+        assert_eq!(bt[12], 0x00); // power_save / mute control unmuted
     }
 }

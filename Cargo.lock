@@ -1096,6 +1096,7 @@ dependencies = [
  "gpui",
  "parking_lot",
  "raw-window-handle",
+ "rusty-opus",
  "serde",
  "thiserror 2.0.21",
  "toml 0.8.23",
@@ -3839,6 +3840,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty-opus"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3255d1fe9772031f725ddb6207044332972ce62ec16f838fc41eeace8983fba8"
 
 [[package]]
 name = "rustybuzz"

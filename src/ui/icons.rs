@@ -309,23 +309,6 @@ pub fn sidebar_toggle_icon(size: f32, col: u32) -> Div {
     })
 }
 
-/// Window minimize-to-system-tray glyph
-pub fn tray_hide_icon(size: f32, col: u32) -> Div {
-    stroke_icon(size, col, ICON_STROKE, |b, xf| {
-        b.move_to(xf.pt(11.0, 18.5));
-        b.line_to(xf.pt(4.0, 18.5));
-        b.line_to(xf.pt(4.0, 5.5));
-        b.line_to(xf.pt(20.0, 5.5));
-        b.line_to(xf.pt(20.0, 12.0));
-        b.move_to(xf.pt(8.5, 9.5));
-        b.line_to(xf.pt(15.0, 15.5));
-        b.move_to(xf.pt(11.0, 15.5));
-        b.line_to(xf.pt(15.2, 15.5));
-        b.line_to(xf.pt(15.2, 11.5));
-        add_rounded_rect(b, xf, 14.5, 16.5, 5.5, 3.0, 1.0);
-    })
-}
-
 pub fn swap_icon(size: f32, col: u32) -> Div {
     stroke_icon(size, col, ICON_STROKE, |b, xf| {
         b.move_to(xf.pt(5.0, 8.5));
@@ -370,5 +353,21 @@ pub fn win_close_icon(col: u32) -> Div {
         b.line_to(xf.pt(19.0, 19.0));
         b.move_to(xf.pt(19.0, 5.0));
         b.line_to(xf.pt(5.0, 19.0));
+    })
+}
+
+pub fn speaker_icon(size: f32, col: u32) -> Div {
+    stroke_icon(size, col, ICON_STROKE, |b, xf| {
+        b.move_to(xf.pt(4.0, 9.5));
+        b.line_to(xf.pt(8.0, 9.5));
+        b.line_to(xf.pt(13.0, 5.5));
+        b.line_to(xf.pt(13.0, 18.5));
+        b.line_to(xf.pt(8.0, 14.5));
+        b.line_to(xf.pt(4.0, 14.5));
+        b.close();
+        b.move_to(xf.pt(16.5, 9.0));
+        b.cubic_bezier_to(xf.pt(16.5, 15.0), xf.pt(18.5, 10.5), xf.pt(18.5, 13.5));
+        b.move_to(xf.pt(19.0, 6.5));
+        b.cubic_bezier_to(xf.pt(19.0, 17.5), xf.pt(21.8, 9.0), xf.pt(21.8, 15.0));
     })
 }

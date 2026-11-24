@@ -1,4 +1,5 @@
 pub mod app_watcher;
+pub mod bt_audio;
 pub mod mouse;
 pub mod processing;
 pub mod profile;
@@ -24,7 +25,8 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use self::app_watcher::ForegroundAppWatcher;
-use self::session::ControllerSessionHandle;
+use self::bt_audio::BtAudioTestSignal;
+use self::session::{ControllerSessionHandle, TestRumbleSignal};
 use crate::cloak::HidHideManager;
 use crate::emu::EmuBackends;
 use crate::emu::vigem::VigemClient;
@@ -49,6 +51,8 @@ pub struct Engine {
     cloak_enabled: Arc<AtomicBool>,
     last_fg_exe: Arc<Mutex<Option<String>>>,
     topology_version: Arc<AtomicU64>,
+    test_rumble: Arc<TestRumbleSignal>,
+    bt_audio_test: Arc<BtAudioTestSignal>,
     stop_tx: Option<Sender<()>>,
     manager_thread: Option<JoinHandle<()>>,
 }
@@ -64,6 +68,8 @@ impl Engine {
         let cloak_enabled = Arc::new(AtomicBool::new(cloak_flag));
         let last_fg_exe = Arc::new(Mutex::new(None));
         let topology_version = Arc::new(AtomicU64::new(1));
+        let test_rumble = Arc::new(TestRumbleSignal::default());
+        let bt_audio_test = Arc::new(BtAudioTestSignal::default());
 
         let vigem = match VigemClient::connect() {
             Ok(c) => Some(c),
@@ -76,7 +82,16 @@ impl Engine {
 
         let initial_devices = enumerate_dualsense_devices()?;
         for info in initial_devices {
-            try_attach_device(info, &backends, &profile, &sessions, &topology_version);
+            try_attach_device(
+                info,
+                &backends,
+                &profile,
+                &sessions,
+                &topology_version,
+                &test_rumble,
+                &bt_audio_test,
+                &cloak_enabled,
+            );
         }
         if cloak_flag {
             let ids = collect_instance_ids(&sessions);
@@ -96,6 +111,8 @@ impl Engine {
         let cloak_c = Arc::clone(&cloak_enabled);
         let fg_c = Arc::clone(&last_fg_exe);
         let topo_c = Arc::clone(&topology_version);
+        let test_rumble_c = Arc::clone(&test_rumble);
+        let bt_audio_test_c = Arc::clone(&bt_audio_test);
 
         let manager_thread = thread::Builder::new()
             .name("ds-mgr".to_owned())
@@ -112,7 +129,16 @@ impl Engine {
                                     let key = path.to_ascii_lowercase();
                                     if !sessions_c.lock().contains_key(&key) {
                                         if let Some(info) = inspect_hid_path(&path) {
-                                            try_attach_device(info, &backends, &profile_c, &sessions_c, &topo_c);
+                                            try_attach_device(
+                                                info,
+                                                &backends,
+                                                &profile_c,
+                                                &sessions_c,
+                                                &topo_c,
+                                                &test_rumble_c,
+                                                &bt_audio_test_c,
+                                                &cloak_c,
+                                            );
                                         }
                                     }
                                 }
@@ -172,9 +198,23 @@ impl Engine {
             cloak_enabled,
             last_fg_exe,
             topology_version,
+            test_rumble,
+            bt_audio_test,
             stop_tx: Some(stop_tx),
             manager_thread: Some(manager_thread),
         })
+    }
+
+    pub fn trigger_test_rumble(&self, large: u8, small: u8, duration_ms: u16) {
+        self.test_rumble.trigger(large, small, duration_ms);
+    }
+
+    pub fn trigger_test_bt_speaker(&self) {
+        self.bt_audio_test.trigger_speaker();
+    }
+
+    pub fn trigger_test_bt_haptics(&self) {
+        self.bt_audio_test.trigger_haptics();
     }
 
     pub fn apply_config(&self, next: &AppConfig) {
@@ -254,6 +294,9 @@ fn try_attach_device(
     profile: &Arc<ArcSwap<ControllerProfile>>,
     sessions: &Arc<Mutex<HashMap<String, ControllerSessionHandle>>>,
     topology_version: &Arc<AtomicU64>,
+    test_rumble: &Arc<TestRumbleSignal>,
+    bt_audio_test: &Arc<BtAudioTestSignal>,
+    cloak_enabled: &Arc<AtomicBool>,
 ) {
     let key = info.device_path.to_ascii_lowercase();
     match DualSenseDevice::open(info) {
@@ -262,6 +305,9 @@ fn try_attach_device(
             backends.clone(),
             Arc::clone(profile),
             Arc::clone(topology_version),
+            Arc::clone(test_rumble),
+            Arc::clone(bt_audio_test),
+            Arc::clone(cloak_enabled),
         ) {
             Ok(handle) => {
                 sessions.lock().insert(key, handle);

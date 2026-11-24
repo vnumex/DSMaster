@@ -8,16 +8,21 @@ Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSen
 - **Xbox 360 and DualShock 4 emulation:** Pure-Rust overlapped `ViGEmBus` IOCTL client with motor rumble and DualShock 4 lightbar feedback routed back to the physical DualSense.
 - **Virtual DualSense emulation (`usbip-win2`):** Clean-room Rust USB/IP v1.1.1 loopback server paired with user-installed `vadimgrn/usbip-win2`, exposing a virtual wired USB DualSense (`0x054C:0x0CE6`) with native adaptive triggers, lightbar RGB, player LEDs, and rumble forwarded back to your physical controller over USB or Bluetooth.
 - **HidHide physical controller cloaking:** Direct `HidHide` IOCTL integration with 3-layer virtual-device self-exclusion to hide only the physical DualSense and prevent double input.
-- **Stick, trigger, and button tuning:** Radial deadzone, anti-deadzone, response curves (`Linear`, `Quadratic`, `Cubic`, `Aggressive`), hair-trigger scaling, and button presets (`Standard`, `SwapFace`, `Tactical`, `BumperJumper`).
-- **Adaptive triggers, lightbar, and player LEDs:** Independent L2 and R2 presets (`Off`, `Rigid`, `Weapon`, `Pulse`), 1-click RGB presets, player indicator LEDs, and rumble toggle.
-- **Touchpad and gyro mouse:** Touchpad-to-mouse and calibrated gyro-to-mouse (`Off`, `Hold L2`, `Hold L1`, `Always On`).
-- **Per-application profiles:** Automatic foreground-window profile switching via `SetWinEventHook` and TOML persistence at `%APPDATA%\DSMaster\profiles.toml`.
+- **Stick, trigger, and button tuning:** Radial/Axial/Passthrough deadzones, outer deadzone (saturation), anti-deadzone, axis inversion, L/R stick swap, response curves (`Linear`, `Quadratic`, `Cubic`, `Aggressive`), independent L2/R2 deadzones & hair-trigger scaling, full customizable button-to-button remapping (with swap & disable), and Turbo rapid-fire.
+- **Adaptive triggers, lighting, and rumble:** Independent L2 and R2 presets (`Off`, `Soft`, `Rigid`, `Weapon`, `Bow`, `Slope`, `Pulse`, `Machine`, `Galloping`, `Custom`), custom trigger parameters, rumble intensity scaling with live Left/Right/Both motor testing, lightbar RGB picker & animations (`Static`, `Breathing`, `Rainbow`, `Battery`, `Trigger`), lightbar & player LED brightness, mic mute LED override, low-battery flash alert, and idle lightbar dim timeout.
+- **Bluetooth speaker, microphone & HD voice-coil haptics:** Dedicated **Audio & mic** section with an optional Virtual Windows Audio Device (`Speakers` + `Microphone (DualSense Wireless Audio)` via `usbip-win2` UAC 1.0), WASAPI loopback PC audio mirroring to the DualSense speaker/3.5 mm jack over Bluetooth (`0x35` 48 kHz 10 ms CBR Opus), full-duplex Bluetooth microphone capture (`0x31` mono Opus), low-passed 3 kHz stereo HD haptics (`0x32` / combined `0x35`), route selection (`Speaker`, `Headphones`, `Both`), independent volume/gain, and built-in test chime & HD haptics generators.
+- **Touchpad, gyro & diagnostics:** Touchpad-to-mouse with 2-finger vertical scroll, tap-to-click, and split L/R click zones; calibrated gyro-to-mouse or gyro-to-right-stick (`Off`, `Hold L2`, `Hold L1`, `Hold R2`, `Hold R1`, `Touchpad`, `Always On`) with deadzone, yaw/roll axes, inversion, and live IMU telemetry; and **Device info** hardware/firmware diagnostics (`0x09`/`0x20` reports).
+- **Per-application profiles:** Automatic foreground-window profile switching via `SetWinEventHook`, profile duplicate/reset, clipboard TOML export/import, and TOML persistence at `%APPDATA%\DSMaster\profiles.toml`.
 - **Background operation and settings:** Native Windows system tray with quick mode/cloak menu, close-to-tray, start minimized, launch at Windows startup, and single-instance wake-up.
-- **VSync Live Input Monitor:** Wait-free `SeqLock` telemetry snapshots rendered at display refresh rate for sticks, triggers, D-Pad, buttons, and rumble feedback.
+- **VSync Live Input Monitor:** Wait-free `SeqLock` telemetry snapshots rendered at display refresh rate for sticks, triggers, D-Pad, buttons, Edge paddles, and rumble feedback.
 
-## Coming Soon
+## Coming Soon (Skipped Big Stuff)
 
-- Per-button custom remapping and macros
+- Full keyboard/mouse & multi-step macro timeline editor
+- DSX UDP Port (`6969`) game mod listener API
+- DualSense Edge onboard flash profile editor & PSVR2 Sense controller support
+- Steam Workshop / community profile browser & installed games launcher
+- Multi-language UI localization, lifetime usage stats & achievements, custom gamepad skins, and in-app log viewer
 
 ## Requirements
 

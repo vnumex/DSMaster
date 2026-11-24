@@ -282,6 +282,9 @@ pub fn parse_input_report(
                     actual: data.len(),
                 });
             }
+            if (data[1] & 0x02) != 0 {
+                return Err(ProtocolError::BluetoothMicAudioPacket);
+            }
             let expected = crc32_with_seed(PS_INPUT_CRC32_SEED, &data[0..74]);
             let actual = u32::from_le_bytes([data[74], data[75], data[76], data[77]]);
             if expected != actual {
@@ -468,6 +471,12 @@ mod tests {
         pkt[0] = DS_INPUT_REPORT_USB;
         let err = parse_input_report(&pkt, Transport::Bluetooth, false).unwrap_err();
         assert_eq!(err, ProtocolError::MinimalBluetoothReport);
+
+        let mut mic_pkt = [0u8; DS_INPUT_REPORT_BT_SIZE];
+        mic_pkt[0] = DS_INPUT_REPORT_BT;
+        mic_pkt[1] = 0x02;
+        let err_mic = parse_input_report(&mic_pkt, Transport::Bluetooth, false).unwrap_err();
+        assert_eq!(err_mic, ProtocolError::BluetoothMicAudioPacket);
     }
 
     #[test]

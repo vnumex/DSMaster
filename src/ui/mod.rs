@@ -5,25 +5,24 @@ pub mod theme;
 mod widgets;
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{
-    Bounds, Context, Div, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
-    Pixels, ScrollHandle, SharedString, Task, Window, WindowControlArea, canvas, div, point,
-    prelude::*, px, relative,
+    Bounds, ClipboardItem, Context, Div, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PathBuilder, Pixels, ScrollHandle, SharedString, Task, Window, WindowControlArea, canvas, div,
+    point, prelude::*, px, relative,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow};
 
 use self::controller_view::{ControllerPreviewState, HighlightZone, virtual_dualsense};
 use self::icons::{
-    check_icon, gamepad_icon, gyro_icon, layers_icon, link_icon, plus_icon, settings_icon,
-    sidebar_toggle_icon, sliders_icon, stick_icon, sun_icon, swap_icon, trash_icon, tray_hide_icon,
-    trigger_icon, win_close_icon, win_max_icon, win_min_icon,
+    check_icon, gamepad_icon, gyro_icon, info_icon, layers_icon, link_icon, plus_icon,
+    settings_icon, sidebar_toggle_icon, sliders_icon, speaker_icon, stick_icon, sun_icon,
+    swap_icon, trash_icon, trigger_icon, win_close_icon, win_max_icon, win_min_icon,
 };
 use self::theme::{
     ACCENT, ACCENT_FG, ACCENT_SOLID, ACCENT_SOLID_HOVER, BORDER, BORDER_STRONG, CANVAS_BG,
@@ -34,10 +33,10 @@ use self::theme::{
 };
 use self::widgets::{
     SLIDER_SLOTS, danger_button, deadzone_showcase, drawer_nav_item, driver_status_pill,
-    hue_slider_bar, icon_rail_item, latency_sparkline, meter_row, meter_row_with_width,
-    pill_button, primary_cta_button, response_curve_chart, rgb_channel_bar, section_card,
-    section_card_with_action, segmented_button, setting_row, slider_bar, status_info_pill,
-    status_inset_pill, subtle_button, sv_color_pad, text_tooltip, toggle_switch,
+    hue_slider_bar, icon_rail_item, info_kv_tile, meter_row,
+    meter_row_with_width, pill_button, primary_cta_button, response_curve_chart, rgb_channel_bar,
+    section_card, section_card_with_action, segmented_button, setting_row, slider_bar,
+    status_info_pill, status_inset_pill, subtle_button, sv_color_pad, text_tooltip, toggle_switch,
     trigger_travel_gauge,
 };
 use crate::cloak::HidHideManager;
@@ -46,13 +45,15 @@ use crate::emu::EmulationMode;
 use crate::emu::dualsense::is_usbip_win2_installed;
 use crate::emu::vigem::is_vigem_installed;
 use crate::engine::profile::{
-    ButtonPreset, GyroAimMode, ResponseCurve, StickTuning, TriggerPreset,
+    CustomTriggerMode, DeadzoneShape, GyroAimMode, GyroOutputMode, LightbarMode,
+    MicMuteLedOverride, RemappableButton, ResponseCurve, StickTuning, TriggerPreset,
 };
 use crate::engine::profiles_store::{
     AppConfig, NamedProfile, config_path, load_config, open_config_dir, save_config,
 };
+use crate::engine::session::is_low_battery_alert;
 use crate::engine::{Engine, SeqLock, TelemetrySnapshot};
-use crate::protocol::{BatteryStatus, Transport};
+use crate::protocol::{BatteryStatus, BtAudioRoute, LedBrightness, Transport};
 use crate::startup::{is_run_at_startup_enabled, set_run_at_startup};
 use crate::tray::{SystemTray, TrayAction, TrayState};
 
@@ -62,8 +63,10 @@ enum ActivePage {
     Profiles,
     Sticks,
     Triggers,
+    Audio,
     Lighting,
     MotionRemap,
+    DeviceInfo,
     Settings,
 }
 
@@ -84,6 +87,7 @@ impl ActivePage {
             Self::QuickSettings
                 | Self::Sticks
                 | Self::Triggers
+                | Self::Audio
                 | Self::Lighting
                 | Self::MotionRemap
         )
@@ -122,8 +126,9 @@ const PLAYER_LED_OPTIONS: [(&str, u8); 5] = [
 ];
 
 const MAX_STICK_DZ: f32 = 0.35;
+const MAX_OUTER_DZ: f32 = 0.40;
 const MAX_TRIGGER_DZ_PCT: f32 = 35.0;
-const LATENCY_HISTORY_CAP: usize = 60;
+const MAX_GYRO_DZ: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveSlider {
@@ -136,6 +141,23 @@ enum ActiveSlider {
     RedChannel,
     GreenChannel,
     BlueChannel,
+    LeftOuter,
+    RightOuter,
+    RightTriggerDz,
+    RumbleStrength,
+    LightbarBrightness,
+    GyroDeadzone,
+    CustomLeftStart,
+    CustomLeftEnd,
+    CustomLeftForce,
+    CustomLeftFreq,
+    CustomRightStart,
+    CustomRightEnd,
+    CustomRightForce,
+    CustomRightFreq,
+    BtSpeakerVolume,
+    BtHapticsGain,
+    BtMicGain,
 }
 
 impl ActiveSlider {
@@ -151,6 +173,23 @@ impl ActiveSlider {
             Self::RedChannel => 6,
             Self::GreenChannel => 7,
             Self::BlueChannel => 8,
+            Self::LeftOuter => 9,
+            Self::RightOuter => 10,
+            Self::RightTriggerDz => 11,
+            Self::RumbleStrength => 12,
+            Self::LightbarBrightness => 13,
+            Self::GyroDeadzone => 14,
+            Self::CustomLeftStart => 15,
+            Self::CustomLeftEnd => 16,
+            Self::CustomLeftForce => 17,
+            Self::CustomLeftFreq => 18,
+            Self::CustomRightStart => 19,
+            Self::CustomRightEnd => 20,
+            Self::CustomRightForce => 21,
+            Self::CustomRightFreq => 22,
+            Self::BtSpeakerVolume => 23,
+            Self::BtHapticsGain => 24,
+            Self::BtMicGain => 25,
         }
     }
 }
@@ -174,22 +213,26 @@ fn fmt_thousands(n: u64) -> String {
     out
 }
 
-fn button_preset_desc(preset: ButtonPreset) -> &'static str {
-    match preset {
-        ButtonPreset::Standard => "Default PlayStation to Xbox / DS4 layout",
-        ButtonPreset::SwapFace => "Swap Cross ↔ Circle and Square ↔ Triangle",
-        ButtonPreset::Tactical => "Swap Circle (crouch) with R3 (melee)",
-        ButtonPreset::BumperJumper => "Swap Cross (jump) with L1 bumper",
-    }
-}
-
 fn trigger_preset_desc(preset: TriggerPreset) -> &'static str {
     match preset {
         TriggerPreset::Off => "No motorized resistance",
+        TriggerPreset::Soft => "Light continuous spring tension",
         TriggerPreset::Rigid => "Firm continuous spring tension",
         TriggerPreset::Weapon => "Crisp snap-break wall halfway down",
+        TriggerPreset::Bow => "Progressive draw tension with string snap-back",
+        TriggerPreset::Slope => "Smoothly ramping resistance across travel",
         TriggerPreset::Pulse => "Rapid rhythmic vibration feedback",
+        TriggerPreset::Machine => "Dual-amplitude automatic weapon cycling",
+        TriggerPreset::Galloping => "Rhythmic dual-pulse galloping cadence",
+        TriggerPreset::Custom => "Custom adaptive trigger parameters",
     }
+}
+
+fn fmt_hms(secs: u32) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 pub struct DsMasterView {
@@ -205,12 +248,11 @@ pub struct DsMasterView {
     page: ActivePage,
     drawer_open: bool,
     show_raw_sticks: bool,
+    selected_remap_src: Option<RemappableButton>,
     last_topology_version: u64,
     handles: Vec<Arc<SeqLock<TelemetrySnapshot>>>,
     selected_idx: usize,
     snapshots: Vec<TelemetrySnapshot>,
-    latency_history: VecDeque<f32>,
-    last_packet_count: u64,
     window_ctl: WindowControlState,
     run_at_startup: bool,
     tray_tx: crossbeam_channel::Sender<TrayAction>,
@@ -265,12 +307,11 @@ impl DsMasterView {
             page: ActivePage::QuickSettings,
             drawer_open: true,
             show_raw_sticks: false,
+            selected_remap_src: None,
             last_topology_version: 0,
             handles: Vec::new(),
             selected_idx: 0,
             snapshots: Vec::new(),
-            latency_history: VecDeque::with_capacity(LATENCY_HISTORY_CAP),
-            last_packet_count: 0,
             window_ctl,
             run_at_startup,
             tray_tx,
@@ -345,10 +386,6 @@ impl DsMasterView {
         if self.selected_idx >= self.handles.len() {
             self.selected_idx = 0;
         }
-        if self.handles.is_empty() {
-            self.latency_history.clear();
-            self.last_packet_count = 0;
-        }
         let engine_prof = engine.active_profile_name();
         if self.config.active_profile != engine_prof {
             self.config.active_profile = engine_prof;
@@ -361,15 +398,6 @@ impl DsMasterView {
         self.snapshots.clear();
         for handle in &self.handles {
             self.snapshots.push(handle.read());
-        }
-        if let Some(s) = self.snapshots.get(self.selected_idx) {
-            if s.packet_count != self.last_packet_count && s.proc_us_ema > 0.0 {
-                self.last_packet_count = s.packet_count;
-                if self.latency_history.len() >= LATENCY_HISTORY_CAP {
-                    self.latency_history.pop_front();
-                }
-                self.latency_history.push_back(s.proc_us_ema);
-            }
         }
     }
 
@@ -649,9 +677,14 @@ impl DsMasterView {
             | ActiveSlider::LeftAnti
             | ActiveSlider::RightInner
             | ActiveSlider::RightAnti
-            | ActiveSlider::Trigger => {
+            | ActiveSlider::LeftOuter
+            | ActiveSlider::RightOuter
+            | ActiveSlider::Trigger
+            | ActiveSlider::RightTriggerDz => {
                 let stick_val =
                     ((t * MAX_STICK_DZ * 100.0).round() / 100.0).clamp(0.0, MAX_STICK_DZ);
+                let outer_val =
+                    ((t * MAX_OUTER_DZ * 100.0).round() / 100.0).clamp(0.0, MAX_OUTER_DZ);
                 let trig_pct = (t * MAX_TRIGGER_DZ_PCT)
                     .round()
                     .clamp(0.0, MAX_TRIGGER_DZ_PCT);
@@ -661,10 +694,75 @@ impl DsMasterView {
                 match slider {
                     ActiveSlider::LeftInner => s.left_stick.deadzone = stick_val,
                     ActiveSlider::LeftAnti => s.left_stick.anti_deadzone = stick_val,
+                    ActiveSlider::LeftOuter => s.left_stick.outer_deadzone = outer_val,
                     ActiveSlider::RightInner => s.right_stick.deadzone = stick_val,
                     ActiveSlider::RightAnti => s.right_stick.anti_deadzone = stick_val,
+                    ActiveSlider::RightOuter => s.right_stick.outer_deadzone = outer_val,
                     ActiveSlider::Trigger => s.triggers.deadzone = trig_u8,
+                    ActiveSlider::RightTriggerDz => s.right_trigger_tuning.deadzone = trig_u8,
                     _ => {}
+                }
+            }
+            ActiveSlider::RumbleStrength => {
+                let val = ((t * 20.0).round() / 20.0).clamp(0.0, 1.0);
+                self.config.active_settings_mut().rumble_strength = val;
+            }
+            ActiveSlider::BtSpeakerVolume => {
+                let val = ((t * 20.0).round() / 20.0).clamp(0.0, 1.0);
+                self.config.active_settings_mut().bt_speaker_volume = val;
+            }
+            ActiveSlider::BtHapticsGain => {
+                let val = ((t * 20.0).round() / 20.0).clamp(0.0, 1.0);
+                self.config.active_settings_mut().bt_haptics_gain = val;
+            }
+            ActiveSlider::BtMicGain => {
+                let val = ((t * 20.0).round() / 10.0).clamp(0.0, 2.0);
+                self.config.active_settings_mut().bt_mic_gain = val;
+            }
+            ActiveSlider::LightbarBrightness => {
+                let val = ((t * 20.0).round() / 20.0).clamp(0.0, 1.0);
+                let s = self.config.active_settings_mut();
+                s.override_lightbar = true;
+                s.lightbar_brightness = val;
+            }
+            ActiveSlider::GyroDeadzone => {
+                let val = ((t * MAX_GYRO_DZ * 2.0).round() / 2.0).clamp(0.0, MAX_GYRO_DZ);
+                self.config.active_settings_mut().gyro_deadzone = val;
+            }
+            ActiveSlider::CustomLeftStart
+            | ActiveSlider::CustomLeftEnd
+            | ActiveSlider::CustomLeftForce
+            | ActiveSlider::CustomLeftFreq
+            | ActiveSlider::CustomRightStart
+            | ActiveSlider::CustomRightEnd
+            | ActiveSlider::CustomRightForce
+            | ActiveSlider::CustomRightFreq => {
+                let s = self.config.active_settings_mut();
+                s.override_triggers = true;
+                let (cfg, is_start, is_end, is_force, is_freq) = match slider {
+                    ActiveSlider::CustomLeftStart => (&mut s.left_custom_trigger, true, false, false, false),
+                    ActiveSlider::CustomLeftEnd => (&mut s.left_custom_trigger, false, true, false, false),
+                    ActiveSlider::CustomLeftForce => (&mut s.left_custom_trigger, false, false, true, false),
+                    ActiveSlider::CustomLeftFreq => (&mut s.left_custom_trigger, false, false, false, true),
+                    ActiveSlider::CustomRightStart => (&mut s.right_custom_trigger, true, false, false, false),
+                    ActiveSlider::CustomRightEnd => (&mut s.right_custom_trigger, false, true, false, false),
+                    ActiveSlider::CustomRightForce => (&mut s.right_custom_trigger, false, false, true, false),
+                    _ => (&mut s.right_custom_trigger, false, false, false, true),
+                };
+                if is_start {
+                    cfg.start_position = (t * 8.0).round().clamp(0.0, 8.0) as u8;
+                    if cfg.end_position <= cfg.start_position {
+                        cfg.end_position = (cfg.start_position + 1).min(9);
+                    }
+                } else if is_end {
+                    cfg.end_position = (1.0 + t * 8.0).round().clamp(1.0, 9.0) as u8;
+                    if cfg.end_position <= cfg.start_position {
+                        cfg.start_position = cfg.end_position.saturating_sub(1);
+                    }
+                } else if is_force {
+                    cfg.strength = (1.0 + t * 7.0).round().clamp(1.0, 8.0) as u8;
+                } else if is_freq {
+                    cfg.frequency = (1.0 + t * 99.0).round().clamp(1.0, 100.0) as u8;
                 }
             }
             ActiveSlider::HueBar => {
@@ -792,6 +890,21 @@ impl DsMasterView {
         slider: ActiveSlider,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.render_slider_row_range(title, value_label, ratio, "0%", "35%", fill_color, slider, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_slider_row_range(
+        &self,
+        title: &'static str,
+        value_label: String,
+        ratio: f32,
+        min_label: &'static str,
+        max_label: &'static str,
+        fill_color: u32,
+        slider: ActiveSlider,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
@@ -838,8 +951,8 @@ impl DsMasterView {
                                     .text_xs()
                                     .font_family(FONT_MONO)
                                     .text_color(color(TEXT_MUTED))
-                                    .child("0%")
-                                    .child("35%"),
+                                    .child(min_label)
+                                    .child(max_label),
                             ),
                     )
                     .child(
@@ -865,6 +978,15 @@ impl DsMasterView {
 
     /// Custom frameless dark Windows 11 titlebar (`#101214`, 40px tall, zero status dots)
     fn render_titlebar(&self) -> Div {
+        let low_batt_msg = self.selected_snapshot().and_then(|s| {
+            if !self.handles.is_empty()
+                && is_low_battery_alert(&self.config.active_settings(), s.battery_percent, s.battery_status)
+            {
+                Some(format!("Low battery: {}%", s.battery_percent))
+            } else {
+                None
+            }
+        });
         let notice = self
             .engine_error
             .as_ref()
@@ -873,7 +995,8 @@ impl DsMasterView {
                 self.status_notice
                     .as_ref()
                     .map(|n| (n.clone(), WARN, WARN_SURFACE, WARN_BORDER))
-            });
+            })
+            .or_else(|| low_batt_msg.map(|m| (m, WARN, WARN_SURFACE, WARN_BORDER)));
 
         let mut bar = div()
             .w_full()
@@ -1036,22 +1159,6 @@ impl DsMasterView {
                         })),
                     ),
             )
-            .child(
-                div()
-                    .id("rail-hide-tray")
-                    .size(px(40.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(color(SURFACE)))
-                    .tooltip(text_tooltip("Hide to system tray"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.hide_to_tray(cx);
-                    }))
-                    .child(tray_hide_icon(18.0, TEXT_MUTED)),
-            )
     }
 
     /// Secondary 264px Configuration Drawer (`#1C1F23`, 24px/8px group rhythm, quiet text meta)
@@ -1079,7 +1186,13 @@ impl DsMasterView {
                     BatteryStatus::Charging => "+",
                     _ => "",
                 };
-                format!("{}%{chg} battery · {:.0} Hz", s.battery_percent, s.polling_hz)
+                let emu_lbl = match s.emulation {
+                    EmulationMode::None => "Passthrough",
+                    EmulationMode::Xbox360 => "Xbox 360",
+                    EmulationMode::DualShock4 => "DualShock 4",
+                    EmulationMode::DualSense => "DualSense",
+                };
+                format!("{}%{chg} battery · {emu_lbl}", s.battery_percent)
             }
             None => "Connect over USB or Bluetooth".to_owned(),
         };
@@ -1159,8 +1272,6 @@ impl DsMasterView {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_idx = idx;
-                        this.latency_history.clear();
-                        this.last_packet_count = 0;
                         cx.notify();
                     })),
                 );
@@ -1177,6 +1288,8 @@ impl DsMasterView {
         };
 
         let trigger_meta = profile.override_triggers.then(active_meta);
+        let audio_meta = (profile.virtual_audio_device || profile.bt_haptics_enabled)
+            .then(active_meta);
         let light_meta = profile.override_lightbar.then(active_meta);
         let gyro_meta =
             (profile.gyro_mode != GyroAimMode::Off || profile.touchpad_mouse).then(active_meta);
@@ -1303,6 +1416,19 @@ impl DsMasterView {
                                     )
                                     .child(
                                         drawer_nav_item(
+                                            "nav-audio",
+                                            speaker_icon(16.0, nav_icon_col(ActivePage::Audio)),
+                                            "Audio & mic",
+                                            self.page == ActivePage::Audio,
+                                            audio_meta,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.page = ActivePage::Audio;
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child(
+                                        drawer_nav_item(
                                             "nav-lighting",
                                             sun_icon(16.0, nav_icon_col(ActivePage::Lighting)),
                                             "Lighting & LEDs",
@@ -1324,6 +1450,19 @@ impl DsMasterView {
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::MotionRemap;
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child(
+                                        drawer_nav_item(
+                                            "nav-devinfo",
+                                            info_icon(16.0, nav_icon_col(ActivePage::DeviceInfo)),
+                                            "Device info",
+                                            self.page == ActivePage::DeviceInfo,
+                                            None,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.page = ActivePage::DeviceInfo;
                                             cx.notify();
                                         })),
                                     ),
@@ -1606,27 +1745,33 @@ impl DsMasterView {
         div()
             .flex()
             .items_center()
-            .gap_1()
-            .p_1()
-            .rounded(px(8.0))
-            .bg(color(WELL_BG))
-            .border_1()
-            .border_color(color(BORDER))
+            .gap_2()
             .child(
-                segmented_button("stage-out", "Processed", !self.show_raw_sticks).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.show_raw_sticks = false;
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                segmented_button("stage-raw", "Raw input", self.show_raw_sticks).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.show_raw_sticks = true;
-                        cx.notify();
-                    }),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .rounded(px(8.0))
+                    .bg(color(WELL_BG))
+                    .border_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        segmented_button("stage-out", "Processed", !self.show_raw_sticks).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.show_raw_sticks = false;
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        segmented_button("stage-raw", "Raw input", self.show_raw_sticks).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.show_raw_sticks = true;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
             )
     }
 
@@ -1677,26 +1822,6 @@ impl DsMasterView {
                     .font_family(FONT_MONO)
                     .text_color(color(gauge_lbl_col))
                     .child("R2"),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(relative(0.028))
-                    .bottom(relative(0.025))
-                    .text_xs()
-                    .font_family(FONT_MONO)
-                    .text_color(color(TEXT_MUTED))
-                    .child("VIB"),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(relative(0.026))
-                    .bottom(relative(0.025))
-                    .text_xs()
-                    .font_family(FONT_MONO)
-                    .text_color(color(TEXT_MUTED))
-                    .child("VIB"),
             )
             // Aspect-locked interactive hit zones matching the 912×640 DualSense CAD geometry on 430×228 stage
             .child(
@@ -2269,7 +2394,10 @@ impl DsMasterView {
                                     st.gyro_mode = match st.gyro_mode {
                                         GyroAimMode::Off => GyroAimMode::HoldL2,
                                         GyroAimMode::HoldL2 => GyroAimMode::HoldL1,
-                                        GyroAimMode::HoldL1 => GyroAimMode::AlwaysOn,
+                                        GyroAimMode::HoldL1 => GyroAimMode::HoldR2,
+                                        GyroAimMode::HoldR2 => GyroAimMode::HoldR1,
+                                        GyroAimMode::HoldR1 => GyroAimMode::TouchpadTouch,
+                                        GyroAimMode::TouchpadTouch => GyroAimMode::AlwaysOn,
                                         GyroAimMode::AlwaysOn => GyroAimMode::Off,
                                     };
                                     this.commit_config(cx);
@@ -2303,8 +2431,6 @@ impl DsMasterView {
         } else {
             "Connect DualSense over USB or BT".to_owned()
         };
-
-        let samples: Vec<f32> = self.latency_history.iter().copied().collect();
 
         let mut scan_val_el = div()
             .text_size(px(32.0))
@@ -2394,7 +2520,6 @@ impl DsMasterView {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(latency_sparkline(samples, connected))
                     .child(status_inset_pill(pill_text, connected)),
             );
 
@@ -2470,12 +2595,29 @@ impl DsMasterView {
             ActiveSlider::RightAnti
         };
 
+        let outer_slider = if is_left {
+            ActiveSlider::LeftOuter
+        } else {
+            ActiveSlider::RightOuter
+        };
+
         let dz_row = self.render_slider_row(
             "Radial deadzone",
             format!("{}%", (tuning.deadzone * 100.0).round() as u32),
             tuning.deadzone / MAX_STICK_DZ,
             ACCENT,
             dz_slider,
+            cx,
+        );
+
+        let outer_row = self.render_slider_row_range(
+            "Outer deadzone",
+            format!("{}%", (tuning.outer_deadzone * 100.0).round() as u32),
+            tuning.outer_deadzone / MAX_OUTER_DZ,
+            "0%",
+            "40%",
+            SUCCESS,
+            outer_slider,
             cx,
         );
 
@@ -2487,6 +2629,27 @@ impl DsMasterView {
             adz_slider,
             cx,
         );
+
+        let mut shape_pills = div().flex().flex_wrap().items_center().gap_2();
+        for shape in DeadzoneShape::ALL {
+            let active = tuning.shape == shape;
+            shape_pills = shape_pills.child(
+                pill_button(
+                    SharedString::from(format!("{prefix}-sh-{}", shape.label())),
+                    shape.label(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    if is_left {
+                        s.left_stick.shape = shape;
+                    } else {
+                        s.right_stick.shape = shape;
+                    }
+                    this.commit_config(cx);
+                })),
+            );
+        }
 
         let mut curve_pills = div().flex().flex_wrap().items_center().gap_2();
         for curve in ResponseCurve::ALL {
@@ -2543,7 +2706,73 @@ impl DsMasterView {
                 .border_t_1()
                 .border_color(color(BORDER))
                 .child(dz_row)
+                .child(outer_row)
                 .child(adz_row)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(color(TEXT_SECONDARY))
+                                .child("Deadzone shape"),
+                        )
+                        .child(shape_pills),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(color(TEXT_SECONDARY))
+                                .child("Axis inversion"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    pill_button(
+                                        SharedString::from(format!("{prefix}-invx")),
+                                        "Invert X",
+                                        tuning.invert_x,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        if is_left {
+                                            s.left_stick.invert_x = !s.left_stick.invert_x;
+                                        } else {
+                                            s.right_stick.invert_x = !s.right_stick.invert_x;
+                                        }
+                                        this.commit_config(cx);
+                                    })),
+                                )
+                                .child(
+                                    pill_button(
+                                        SharedString::from(format!("{prefix}-invy")),
+                                        "Invert Y",
+                                        tuning.invert_y,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        if is_left {
+                                            s.left_stick.invert_y = !s.left_stick.invert_y;
+                                        } else {
+                                            s.right_stick.invert_y = !s.right_stick.invert_y;
+                                        }
+                                        this.commit_config(cx);
+                                    })),
+                                ),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
@@ -2617,6 +2846,14 @@ impl DsMasterView {
                                     .text_color(color(TEXT_MUTED))
                                     .child("Blue: deadzone · Silver: anti-deadzone"),
                             )
+                            .child(
+                                pill_button("st-swap-sticks", "Swap L/R sticks", profile.swap_sticks)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        s.swap_sticks = !s.swap_sticks;
+                                        this.commit_config(cx);
+                                    })),
+                            )
                             .child(self.render_raw_output_toggle(cx)),
                     ),
             )
@@ -2639,7 +2876,32 @@ impl DsMasterView {
             "Native"
         };
 
-        let travel_card = section_card("Trigger travel & thresholds").child(
+        let left_trig_tuning = profile.left_trigger_tuning();
+        let right_trig_tuning = profile.right_trigger_tuning();
+
+        let travel_card = section_card_with_action(
+            "Trigger travel & thresholds",
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(color(TEXT_SECONDARY))
+                        .child("Link L2 & R2"),
+                )
+                .child(
+                    toggle_switch("tp-link-trig", profile.link_triggers).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let s = this.config.active_settings_mut();
+                            s.link_triggers = !s.link_triggers;
+                            this.commit_config(cx);
+                        },
+                    )),
+                ),
+        )
+        .child(
             div()
                 .flex()
                 .items_center()
@@ -2647,8 +2909,8 @@ impl DsMasterView {
                 .child(trigger_travel_gauge(
                     "L2 trigger",
                     snap.l2_analog,
-                    profile.triggers.deadzone,
-                    profile.triggers.hair_trigger,
+                    left_trig_tuning.deadzone,
+                    left_trig_tuning.hair_trigger,
                     l2_preset_lbl,
                     profile.override_triggers,
                 ))
@@ -2656,8 +2918,8 @@ impl DsMasterView {
                 .child(trigger_travel_gauge(
                     "R2 trigger",
                     snap.r2_analog,
-                    profile.triggers.deadzone,
-                    profile.triggers.hair_trigger,
+                    right_trig_tuning.deadzone,
+                    right_trig_tuning.hair_trigger,
                     r2_preset_lbl,
                     profile.override_triggers,
                 )),
@@ -2712,7 +2974,7 @@ impl DsMasterView {
             "Using native R2 resistance"
         };
 
-        let adaptive_card = section_card_with_action(
+        let mut adaptive_card = section_card_with_action(
             "Adaptive trigger actuators",
             toggle_switch("tp-trig-override", profile.override_triggers).on_click(cx.listener(
                 |this, _, _, cx| {
@@ -2765,9 +3027,128 @@ impl DsMasterView {
                 ),
         );
 
+        let build_custom_block = |is_left: bool,
+                                  cfg: crate::engine::profile::CustomTriggerConfig,
+                                  cx: &mut Context<Self>|
+         -> Div {
+            let side_tag = if is_left { "L2" } else { "R2" };
+            let mut mode_pills = div().flex().flex_wrap().gap_1();
+            for mode in CustomTriggerMode::ALL {
+                let active = cfg.mode == mode;
+                mode_pills = mode_pills.child(
+                    pill_button(
+                        SharedString::from(format!("tp-cust-{side_tag}-{}", mode.label())),
+                        mode.label(),
+                        active,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.override_triggers = true;
+                        if is_left {
+                            s.left_custom_trigger.mode = mode;
+                        } else {
+                            s.right_custom_trigger.mode = mode;
+                        }
+                        this.commit_config(cx);
+                    })),
+                );
+            }
+            let (s_sl, e_sl, f_sl, fq_sl) = if is_left {
+                (
+                    ActiveSlider::CustomLeftStart,
+                    ActiveSlider::CustomLeftEnd,
+                    ActiveSlider::CustomLeftForce,
+                    ActiveSlider::CustomLeftFreq,
+                )
+            } else {
+                (
+                    ActiveSlider::CustomRightStart,
+                    ActiveSlider::CustomRightEnd,
+                    ActiveSlider::CustomRightForce,
+                    ActiveSlider::CustomRightFreq,
+                )
+            };
+            div()
+                .p_3()
+                .rounded(px(8.0))
+                .bg(color(WELL_BG))
+                .border_1()
+                .border_color(color(BORDER))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(color(ACCENT))
+                        .child(format!("{side_tag} custom parameters")),
+                )
+                .child(mode_pills)
+                .child(self.render_slider_row_range(
+                    "Start zone",
+                    format!("{}", cfg.start_position),
+                    cfg.start_position as f32 / 8.0,
+                    "0",
+                    "8",
+                    ACCENT,
+                    s_sl,
+                    cx,
+                ))
+                .child(self.render_slider_row_range(
+                    "End zone",
+                    format!("{}", cfg.end_position),
+                    (cfg.end_position.saturating_sub(1)) as f32 / 8.0,
+                    "1",
+                    "9",
+                    ACCENT,
+                    e_sl,
+                    cx,
+                ))
+                .child(self.render_slider_row_range(
+                    "Strength",
+                    format!("{}/8", cfg.strength),
+                    (cfg.strength.saturating_sub(1)) as f32 / 7.0,
+                    "1",
+                    "8",
+                    ACCENT,
+                    f_sl,
+                    cx,
+                ))
+                .child(self.render_slider_row_range(
+                    "Frequency",
+                    format!("{} Hz", cfg.frequency),
+                    (cfg.frequency.saturating_sub(1)) as f32 / 99.0,
+                    "1",
+                    "100",
+                    ZONE_SECONDARY,
+                    fq_sl,
+                    cx,
+                ))
+        };
+
+        if profile.override_triggers && profile.left_trigger_preset == TriggerPreset::Custom {
+            adaptive_card = adaptive_card.child(build_custom_block(
+                true,
+                profile.left_custom_trigger,
+                cx,
+            ));
+        }
+        if profile.override_triggers && profile.right_trigger_preset == TriggerPreset::Custom {
+            adaptive_card = adaptive_card.child(build_custom_block(
+                false,
+                profile.right_custom_trigger,
+                cx,
+            ));
+        }
+
         let trig_dz_pct = (profile.triggers.deadzone as f32 * 100.0 / 255.0).round() as u32;
         let trig_dz_row = self.render_slider_row(
-            "Trigger deadzone",
+            if profile.link_triggers {
+                "Trigger deadzone"
+            } else {
+                "L2 deadzone"
+            },
             format!("{trig_dz_pct}%"),
             trig_dz_pct as f32 / MAX_TRIGGER_DZ_PCT,
             ACCENT,
@@ -2788,7 +3169,18 @@ impl DsMasterView {
             );
         }
 
-        let tuning_card = section_card("Hair trigger & rumble motors")
+        let rumble_slider_row = self.render_slider_row_range(
+            "Rumble intensity",
+            format!("{}%", (profile.rumble_strength * 100.0).round() as u32),
+            profile.rumble_strength,
+            "0%",
+            "100%",
+            WARN,
+            ActiveSlider::RumbleStrength,
+            cx,
+        );
+
+        let mut tuning_card = section_card("Hair trigger & rumble motors")
             .flex_1()
             .child(trig_dz_row)
             .child(
@@ -2801,32 +3193,119 @@ impl DsMasterView {
                         div()
                             .text_size(px(13.0))
                             .text_color(color(TEXT_SECONDARY))
-                            .child("Hair trigger cap"),
+                            .child(if profile.link_triggers {
+                                "Hair trigger cap"
+                            } else {
+                                "L2 hair cap"
+                            }),
                     )
                     .child(hair_pills),
-            )
-            .child(
+            );
+
+        if !profile.link_triggers {
+            let r2_dz_pct =
+                (profile.right_trigger_tuning.deadzone as f32 * 100.0 / 255.0).round() as u32;
+            let r2_dz_row = self.render_slider_row(
+                "R2 deadzone",
+                format!("{r2_dz_pct}%"),
+                r2_dz_pct as f32 / MAX_TRIGGER_DZ_PCT,
+                ACCENT,
+                ActiveSlider::RightTriggerDz,
+                cx,
+            );
+            let mut r2_hair_pills = div().flex().flex_wrap().gap_2();
+            for (label, threshold) in HAIR_TRIGGER_STEPS {
+                let active = profile.right_trigger_tuning.hair_trigger == threshold;
+                r2_hair_pills = r2_hair_pills.child(
+                    pill_button(SharedString::from(format!("tp-r2-ht-{label}")), label, active)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.config
+                                .active_settings_mut()
+                                .right_trigger_tuning
+                                .hair_trigger = threshold;
+                            this.commit_config(cx);
+                        })),
+                );
+            }
+            tuning_card = tuning_card.child(r2_dz_row).child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .justify_between()
                     .gap_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(color(BORDER))
-                    .child(setting_row(
-                        "Rumble feedback",
-                        "Route virtual controller rumble back to the physical DualSense",
-                        toggle_switch("tp-rumble-sw", profile.enable_rumble).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                let s = this.config.active_settings_mut();
-                                s.enable_rumble = !s.enable_rumble;
-                                this.commit_config(cx);
-                            },
-                        )),
-                    ))
-                    .child(meter_row("Large motor", snap.rumble_large, WARN))
-                    .child(meter_row("Small motor", snap.rumble_small, WARN)),
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(color(TEXT_SECONDARY))
+                            .child("R2 hair cap"),
+                    )
+                    .child(r2_hair_pills),
             );
+        }
+
+        let tuning_card = tuning_card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pt_3()
+                .border_t_1()
+                .border_color(color(BORDER))
+                .child(setting_row(
+                    "Rumble feedback",
+                    "Route virtual controller rumble back to the physical DualSense",
+                    toggle_switch("tp-rumble-sw", profile.enable_rumble).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let s = this.config.active_settings_mut();
+                            s.enable_rumble = !s.enable_rumble;
+                            this.commit_config(cx);
+                        },
+                    )),
+                ))
+                .child(rumble_slider_row)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(color(TEXT_SECONDARY))
+                                .child("Test motors"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(subtle_button("tp-test-left", "Left").on_click(
+                                    cx.listener(|this, _, _, _| {
+                                        if let Some(eng) = &this.engine {
+                                            eng.trigger_test_rumble(200, 0, 400);
+                                        }
+                                    }),
+                                ))
+                                .child(subtle_button("tp-test-right", "Right").on_click(
+                                    cx.listener(|this, _, _, _| {
+                                        if let Some(eng) = &this.engine {
+                                            eng.trigger_test_rumble(0, 200, 400);
+                                        }
+                                    }),
+                                ))
+                                .child(subtle_button("tp-test-both", "Both").on_click(
+                                    cx.listener(|this, _, _, _| {
+                                        if let Some(eng) = &this.engine {
+                                            eng.trigger_test_rumble(200, 200, 400);
+                                        }
+                                    }),
+                                )),
+                        ),
+                )
+                .child(meter_row("Large motor", snap.rumble_large, WARN))
+                .child(meter_row("Small motor", snap.rumble_small, WARN)),
+        );
 
         div()
             .flex()
@@ -2848,6 +3327,308 @@ impl DsMasterView {
             )
             .child(travel_card)
             .child(div().flex().gap_4().child(adaptive_card).child(tuning_card))
+    }
+
+    /// Page: Audio & mic (Virtual Windows Audio Device + Bluetooth Speaker, Mic & HD Haptics)
+    fn render_audio_page(&self, cx: &mut Context<Self>) -> Div {
+        let profile = self.config.active_settings();
+        let snap = self.selected_snapshot().copied().unwrap_or_default();
+
+        let va_status_pill = if !snap.active {
+            status_inset_pill("No controller", false)
+        } else if snap.transport != Transport::Bluetooth {
+            status_inset_pill("Connect via Bluetooth", false)
+        } else if !self.vds_available {
+            status_inset_pill("Requires usbip-win2", false)
+        } else if snap.virtual_audio_attached {
+            status_inset_pill("Active · Windows Audio", true)
+        } else if profile.virtual_audio_device {
+            status_inset_pill("Attaching · Windows Audio", false)
+        } else {
+            status_inset_pill("Disabled", false)
+        };
+
+        let bt_status_pill = if !snap.active {
+            status_inset_pill("No controller", false)
+        } else if snap.transport != Transport::Bluetooth {
+            status_inset_pill("Connect via Bluetooth", false)
+        } else if snap.bt_audio_streaming || snap.bt_haptics_streaming || snap.bt_mic_streaming {
+            status_inset_pill("Streaming · Bluetooth", true)
+        } else {
+            status_inset_pill("Ready · Bluetooth", true)
+        };
+
+        let mic_gain_row = self.render_slider_row_range(
+            "Microphone gain",
+            format!("{}%", (profile.bt_mic_gain * 100.0).round() as u32),
+            (profile.bt_mic_gain / 2.0).clamp(0.0, 1.0),
+            "0%",
+            "200%",
+            SUCCESS,
+            ActiveSlider::BtMicGain,
+            cx,
+        );
+
+        let spk_vol_row = self.render_slider_row_range(
+            "Speaker volume",
+            format!("{}%", (profile.bt_speaker_volume * 100.0).round() as u32),
+            profile.bt_speaker_volume,
+            "0%",
+            "100%",
+            ACCENT,
+            ActiveSlider::BtSpeakerVolume,
+            cx,
+        );
+
+        let hap_gain_row = self.render_slider_row_range(
+            "Haptics intensity",
+            format!("{}%", (profile.bt_haptics_gain * 100.0).round() as u32),
+            profile.bt_haptics_gain,
+            "0%",
+            "100%",
+            WARN,
+            ActiveSlider::BtHapticsGain,
+            cx,
+        );
+
+        let mut route_pills = div().flex().w_full().gap_2();
+        for route in BtAudioRoute::ALL {
+            let active = profile.bt_audio_route == route;
+            route_pills = route_pills.child(
+                pill_button(
+                    format!("bt-route-{}", route.label()),
+                    route.label(),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.active_settings_mut().bt_audio_route = route;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let cloak_on = self
+            .engine
+            .as_ref()
+            .is_some_and(Engine::is_cloak_enabled);
+
+        let mut virtual_audio_card =
+            section_card_with_action("Windows audio device (Speaker & Mic)", va_status_pill)
+                .child(setting_row(
+                    "Enable DualSense audio device",
+                    "Registers Speakers & Microphone (DualSense Wireless Audio) in Windows Sound via usbip-win2",
+                    toggle_switch("va-enable-toggle", profile.virtual_audio_device).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            let next_on = {
+                                let s = this.config.active_settings_mut();
+                                s.virtual_audio_device = !s.virtual_audio_device;
+                                s.virtual_audio_device
+                            };
+                            if next_on && this.hidhide_available {
+                                let emu = this.config.active_settings().emulation;
+                                if emu != EmulationMode::None {
+                                    if let Some(eng) = &this.engine {
+                                        if !eng.is_cloak_enabled() && eng.set_cloak_enabled(true).is_ok() {
+                                            this.config.cloak_physical = true;
+                                        }
+                                    }
+                                }
+                            }
+                            this.commit_config(cx);
+                        }),
+                    ),
+                ));
+
+        if !self.vds_available {
+            virtual_audio_card = virtual_audio_card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .bg(color(WELL_BG))
+                    .border_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(TEXT_SECONDARY))
+                            .child("usbip-win2 driver is required to register virtual Windows audio endpoints."),
+                    )
+                    .child(
+                        subtle_button("va-open-settings", "Open driver settings").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.page = ActivePage::Settings;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+        }
+
+        if profile.virtual_audio_device && !cloak_on {
+            let can_cloak_now = self.hidhide_available && profile.emulation != EmulationMode::None;
+            let mut cloak_warn = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .p_3()
+                .rounded(px(8.0))
+                .bg(color(WARN_SURFACE))
+                .border_1()
+                .border_color(color(WARN_BORDER))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(WARN))
+                        .child("Enable HidHide cloaking (with a virtual controller) to activate the Bluetooth microphone without triggering Steam ghost inputs."),
+                );
+            if can_cloak_now {
+                cloak_warn = cloak_warn.child(
+                    subtle_button("va-enable-cloak", "Enable cloaking").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            if let Some(eng) = &this.engine {
+                                if eng.set_cloak_enabled(true).is_ok() {
+                                    this.config.cloak_physical = true;
+                                    this.commit_config(cx);
+                                }
+                            }
+                        },
+                    )),
+                );
+            }
+            virtual_audio_card = virtual_audio_card.child(cloak_warn);
+        }
+
+        virtual_audio_card = virtual_audio_card
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(status_inset_pill(
+                        "Speakers (DualSense Wireless Audio)",
+                        snap.virtual_speaker_active,
+                    ))
+                    .child(status_inset_pill(
+                        "Microphone (DualSense Wireless Audio)",
+                        snap.virtual_mic_active,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_6()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(color(TEXT_SECONDARY))
+                                            .child("Output route"),
+                                    )
+                                    .child(route_pills),
+                            )
+                            .child(spk_vol_row)
+                            .child(meter_row("Speaker output", snap.bt_speaker_level, ACCENT))
+                            .child(
+                                div().flex().justify_end().child(
+                                    subtle_button("bt-test-speaker", "Test chime").on_click(
+                                        cx.listener(|this, _, _, _| {
+                                            if let Some(eng) = &this.engine {
+                                                eng.trigger_test_bt_speaker();
+                                            }
+                                        }),
+                                    ),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(mic_gain_row)
+                            .child(meter_row("Microphone input", snap.bt_mic_level, SUCCESS))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(if snap.mic_muted_hw { WARN } else { TEXT_MUTED }))
+                                    .child(if snap.mic_muted_hw {
+                                        "Hardware mic mute is active on the controller."
+                                    } else {
+                                        "Opens automatically when an app records from the DualSense microphone."
+                                    }),
+                            ),
+                    ),
+            );
+
+        let haptics_card = section_card_with_action("Bluetooth HD haptics", bt_status_pill)
+            .child(setting_row(
+                "Audio-to-Haptics (voice coils)",
+                "Drives DualSense voice coils from low-passed audio (0x32 / 0x35); pauses legacy rumble while active.",
+                toggle_switch("bt-hap-toggle", profile.bt_haptics_enabled).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.bt_haptics_enabled = !s.bt_haptics_enabled;
+                        this.commit_config(cx);
+                    }),
+                ),
+            ))
+            .child(hap_gain_row)
+            .child(meter_row("Haptics output", snap.bt_haptics_level, WARN))
+            .child(
+                div().flex().justify_end().child(
+                    subtle_button("bt-test-haptics", "Test HD haptics").on_click(
+                        cx.listener(|this, _, _, _| {
+                            if let Some(eng) = &this.engine {
+                                eng.trigger_test_bt_haptics();
+                            }
+                        }),
+                    ),
+                ),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color(TEXT))
+                            .child("Audio & mic"),
+                    )
+                    .child(self.render_raw_output_toggle(cx)),
+            )
+            .child(virtual_audio_card)
+            .child(haptics_card)
     }
 
     /// Page 4: Lighting & player LEDs
@@ -3159,7 +3940,51 @@ impl DsMasterView {
             "Custom lightbar color active on connected DualSense".to_owned()
         };
 
-        let rgb_card = section_card_with_action(
+        let mut mode_pills = div().flex().flex_wrap().items_center().gap_2();
+        for mode in LightbarMode::ALL {
+            let active = profile.override_lightbar && profile.lightbar_mode == mode;
+            mode_pills = mode_pills.child(
+                pill_button(
+                    SharedString::from(format!("lp-mode-{}", mode.label())),
+                    mode.label(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.override_lightbar = true;
+                    s.lightbar_mode = mode;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let brightness_row = self.render_slider_row_range(
+            "Lightbar brightness",
+            format!("{}%", (profile.lightbar_brightness * 100.0).round() as u32),
+            profile.lightbar_brightness,
+            "0%",
+            "100%",
+            ACCENT,
+            ActiveSlider::LightbarBrightness,
+            cx,
+        );
+
+        let mut speed_pills = div().flex().flex_wrap().items_center().gap_2();
+        for (lbl, spd) in SENSITIVITY_STEPS {
+            let active = (profile.lightbar_speed - spd).abs() < 0.05;
+            speed_pills = speed_pills.child(
+                pill_button(SharedString::from(format!("lp-spd-{lbl}")), lbl, active).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.override_lightbar = true;
+                        s.lightbar_speed = spd;
+                        this.commit_config(cx);
+                    }),
+                ),
+            );
+        }
+
+        let mut rgb_card = section_card_with_action(
             "Lightbar color",
             toggle_switch("lp-lb-override", profile.override_lightbar).on_click(cx.listener(
                 |this, _, _, cx| {
@@ -3172,7 +3997,52 @@ impl DsMasterView {
         .flex_1()
         .child(color_picker_well)
         .child(swatch_grid)
-        .child(if profile.override_lightbar {
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .pt_3()
+                .border_t_1()
+                .border_color(color(BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(color(TEXT_SECONDARY))
+                                .child("Effect mode"),
+                        )
+                        .child(mode_pills),
+                )
+                .child(brightness_row),
+        );
+
+        if matches!(
+            profile.lightbar_mode,
+            LightbarMode::Breathing | LightbarMode::Rainbow
+        ) {
+            rgb_card = rgb_card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(color(TEXT_SECONDARY))
+                            .child("Animation speed"),
+                    )
+                    .child(speed_pills),
+            );
+        }
+
+        let rgb_card = rgb_card.child(if profile.override_lightbar {
             status_inset_pill(ds4_note, true)
         } else {
             status_info_pill(ds4_note)
@@ -3235,8 +4105,80 @@ impl DsMasterView {
             );
         }
 
-        let leds_card = section_card("Player indicator LEDs")
-            .w(px(336.0))
+        let mut led_bright_pills = div().flex().w_full().gap_2();
+        for br in LedBrightness::ALL {
+            let active = profile.player_led_brightness == br;
+            led_bright_pills = led_bright_pills.child(
+                pill_button(
+                    SharedString::from(format!("lp-bright-{}", br.label())),
+                    br.label(),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.override_lightbar = true;
+                    s.player_led_brightness = br;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut mute_led_pills = div().flex().w_full().gap_2();
+        for mode in MicMuteLedOverride::ALL {
+            let active = profile.mic_mute_led == mode;
+            mute_led_pills = mute_led_pills.child(
+                pill_button(
+                    SharedString::from(format!("lp-mute-{}", mode.label())),
+                    mode.label(),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.active_settings_mut().mic_mute_led = mode;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut batt_thresh_pills = div().flex().w_full().gap_2();
+        for pct in [15u8, 20, 30] {
+            let active = profile.low_battery_threshold == pct;
+            batt_thresh_pills = batt_thresh_pills.child(
+                pill_button(
+                    SharedString::from(format!("lp-bth-{pct}")),
+                    format!("{pct}%"),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.low_battery_alert = true;
+                    s.low_battery_threshold = pct;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut idle_dim_pills = div().flex().w_full().gap_2();
+        for (lbl, secs) in [("Off", 0u16), ("1m", 60), ("3m", 180), ("5m", 300)] {
+            let active = profile.idle_dim_secs == secs;
+            idle_dim_pills = idle_dim_pills.child(
+                pill_button(SharedString::from(format!("lp-idle-{lbl}")), lbl, active)
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.config.active_settings_mut().idle_dim_secs = secs;
+                        this.commit_config(cx);
+                    })),
+            );
+        }
+
+        let leds_card = section_card("Player, mute & power LEDs")
+            .w(px(360.0))
             .flex_shrink_0()
             .child(
                 div()
@@ -3244,7 +4186,88 @@ impl DsMasterView {
                     .text_color(color(TEXT_MUTED))
                     .child("Select the 5-LED bar pattern beneath the touchpad"),
             )
-            .child(led_cards);
+            .child(led_cards)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(color(TEXT_SECONDARY))
+                                    .child("LED brightness"),
+                            )
+                            .child(led_bright_pills),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(color(TEXT_SECONDARY))
+                                    .child("Mic mute LED"),
+                            )
+                            .child(mute_led_pills),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(setting_row(
+                        "Low-battery flash",
+                        "Pulse red lightbar when battery drops below threshold",
+                        toggle_switch("lp-lowbatt-sw", profile.low_battery_alert).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                let s = this.config.active_settings_mut();
+                                s.low_battery_alert = !s.low_battery_alert;
+                                this.commit_config(cx);
+                            }),
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(color(TEXT_SECONDARY))
+                                    .child("Alert threshold"),
+                            )
+                            .child(batt_thresh_pills),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(color(TEXT_SECONDARY))
+                                    .child("Idle dim timeout"),
+                            )
+                            .child(idle_dim_pills),
+                    ),
+            );
 
         div()
             .flex()
@@ -3270,60 +4293,267 @@ impl DsMasterView {
     /// Page 5: Motion & button remap
     fn render_motion_remap_page(&self, cx: &mut Context<Self>) -> Div {
         let profile = self.config.active_settings();
+        let snap = self.selected_snapshot().copied().unwrap_or_default();
 
-        let mut preset_tiles = div().flex().flex_wrap().gap_3();
-        for preset in ButtonPreset::ALL {
-            let active = profile.button_preset == preset;
-            preset_tiles = preset_tiles.child(
+        let mut source_grid = div().flex().flex_wrap().gap_2();
+        for src in RemappableButton::SOURCES {
+            let dst = profile.button_map.get(src);
+            let is_custom = dst != src;
+            let is_sel = self.selected_remap_src == Some(src);
+            source_grid = source_grid.child(
                 div()
-                    .id(SharedString::from(format!("mr-bp-{}", preset.label())))
-                    .w(px(224.0))
+                    .id(SharedString::from(format!("mr-src-{}", src.label())))
+                    .w(px(148.0))
                     .flex_1()
-                    .min_w(px(200.0))
-                    .p_4()
+                    .min_w(px(136.0))
+                    .px_3()
+                    .py_2()
                     .rounded(px(8.0))
-                    .bg(color(if active { SURFACE_ALT } else { WELL_BG }))
+                    .bg(color(if is_sel {
+                        SURFACE_HOVER
+                    } else if is_custom {
+                        SURFACE_ALT
+                    } else {
+                        WELL_BG
+                    }))
                     .border_1()
-                    .border_color(color(if active { BORDER_STRONG } else { BORDER }))
+                    .border_color(color(if is_sel {
+                        ACCENT
+                    } else if is_custom {
+                        BORDER_STRONG
+                    } else {
+                        BORDER
+                    }))
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .justify_between()
                     .gap_2()
                     .cursor_pointer()
                     .hover(|s| s.border_color(color(BORDER_STRONG)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.config.active_settings_mut().button_preset = preset;
-                        this.commit_config(cx);
+                        this.selected_remap_src = if this.selected_remap_src == Some(src) {
+                            None
+                        } else {
+                            Some(src)
+                        };
+                        cx.notify();
                     }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color(TEXT))
+                            .child(src.label()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(FONT_MONO)
+                            .text_color(color(if dst == RemappableButton::None {
+                                DANGER
+                            } else if is_custom {
+                                ACCENT
+                            } else {
+                                TEXT_MUTED
+                            }))
+                            .child(if is_custom {
+                                format!("→ {}", dst.label())
+                            } else {
+                                dst.label().to_owned()
+                            }),
+                    ),
+            );
+        }
+
+        let mut turbo_targets = div().flex().flex_wrap().gap_1();
+        for tgt in RemappableButton::TURBO_TARGETS {
+            let active = profile.turbo.target == tgt;
+            turbo_targets = turbo_targets.child(
+                pill_button(
+                    SharedString::from(format!("mr-tb-{}", tgt.label())),
+                    tgt.label(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.turbo.target = tgt;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut turbo_rates = div().flex().flex_wrap().gap_2();
+        for rate in [5u8, 10, 15, 20] {
+            let active = profile.turbo.rate_hz == rate;
+            turbo_rates = turbo_rates.child(
+                pill_button(
+                    SharedString::from(format!("mr-tbr-{rate}")),
+                    format!("{rate} Hz"),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.turbo.enabled = true;
+                    s.turbo.rate_hz = rate;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let custom_count = profile.button_map.custom_count();
+        let mut remap_card = section_card_with_action(
+            "Button remapping",
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(TEXT_MUTED))
+                        .child(if custom_count == 0 {
+                            "1:1 default".to_owned()
+                        } else {
+                            format!("{custom_count} customized")
+                        }),
+                )
+                .child(
+                    subtle_button("mr-map-reset-all", "Reset all").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.config.active_settings_mut().button_map = Default::default();
+                            this.selected_remap_src = None;
+                            this.commit_config(cx);
+                        },
+                    )),
+                ),
+        )
+        .flex_1()
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(color(TEXT_MUTED))
+                .child("Click any physical button to remap, swap, or disable it"),
+        )
+        .child(source_grid);
+
+        if let Some(src) = self.selected_remap_src {
+            let cur_dst = profile.button_map.get(src);
+            let mut dst_pills = div().flex().flex_wrap().gap_1().child(
+                pill_button("mr-dst-off", "Off", cur_dst == RemappableButton::None).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.config
+                            .active_settings_mut()
+                            .button_map
+                            .set(src, RemappableButton::None);
+                        this.commit_config(cx);
+                    }),
+                ),
+            );
+            for dst in RemappableButton::SOURCES {
+                let active = cur_dst == dst;
+                dst_pills = dst_pills.child(
+                    pill_button(
+                        SharedString::from(format!("mr-dst-{}", dst.label())),
+                        dst.label(),
+                        active,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.config.active_settings_mut().button_map.set(src, dst);
+                        this.commit_config(cx);
+                    })),
+                );
+            }
+
+            let mut tray_actions = div().flex().items_center().gap_2().child(
+                subtle_button("mr-dst-reset-one", "Reset").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.config.active_settings_mut().button_map.set(src, src);
+                        this.commit_config(cx);
+                    },
+                )),
+            );
+            if cur_dst != src && cur_dst != RemappableButton::None {
+                tray_actions = tray_actions.child(
+                    subtle_button("mr-dst-swap", format!("Swap with {}", cur_dst.label()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let map = &mut this.config.active_settings_mut().button_map;
+                            map.set(src, src);
+                            map.swap(src, cur_dst);
+                            this.commit_config(cx);
+                        })),
+                );
+            }
+
+            remap_card = remap_card.child(
+                div()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .bg(color(WELL_BG))
+                    .border_1()
+                    .border_color(color(BORDER_STRONG))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap_2()
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(color(if active { TEXT } else { TEXT_SECONDARY }))
-                                    .child(preset.label()),
+                                    .text_color(color(ACCENT))
+                                    .child(format!("Remap {} → {}", src.label(), cur_dst.label())),
                             )
-                            .child(if active {
-                                check_icon(16.0, ACCENT)
-                            } else {
-                                div()
-                            }),
+                            .child(tray_actions),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(color(TEXT_MUTED))
-                            .child(button_preset_desc(preset)),
-                    ),
+                    .child(dst_pills),
             );
         }
 
-        let remap_card = section_card("Button layout presets")
-            .flex_1()
-            .child(preset_tiles);
+        let mut turbo_box = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(color(BORDER))
+            .child(setting_row(
+                "Turbo rapid-fire",
+                "Pulse the selected button at a fixed rate while held",
+                toggle_switch("mr-turbo-sw", profile.turbo.enabled).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.turbo.enabled = !s.turbo.enabled;
+                        this.commit_config(cx);
+                    },
+                )),
+            ))
+            .child(turbo_targets)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(color(TEXT_SECONDARY))
+                            .child("Turbo rate"),
+                    )
+                    .child(turbo_rates),
+            );
+
+        if profile.turbo.enabled && profile.emulation == EmulationMode::None {
+            turbo_box = turbo_box.child(status_info_pill(
+                "Enable Xbox 360, DualShock 4, or DualSense emulation for games to receive Turbo pulses",
+            ));
+        }
+
+        let remap_card = remap_card.child(turbo_box);
 
         let tp_enabled = profile.touchpad_mouse;
         let mut tp_sens = div().flex().flex_wrap().gap_2();
@@ -3344,7 +4574,23 @@ impl DsMasterView {
             );
         }
 
-        let mut gyro_modes = div().flex().flex_wrap().gap_2();
+        let mut gyro_outputs = div().flex().flex_wrap().gap_2();
+        for out_mode in GyroOutputMode::ALL {
+            let active = profile.gyro_output == out_mode;
+            gyro_outputs = gyro_outputs.child(
+                pill_button(
+                    SharedString::from(format!("mr-go-{}", out_mode.label())),
+                    out_mode.label(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.active_settings_mut().gyro_output = out_mode;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut gyro_modes = div().flex().flex_wrap().gap_1();
         for mode in GyroAimMode::ALL {
             let active = profile.gyro_mode == mode;
             gyro_modes = gyro_modes.child(
@@ -3381,6 +4627,48 @@ impl DsMasterView {
             );
         }
 
+        let gyro_dz_row = self.render_slider_row_range(
+            "Gyro deadzone",
+            format!("{:.1}°/s", profile.gyro_deadzone),
+            profile.gyro_deadzone / MAX_GYRO_DZ,
+            "0°/s",
+            "8°/s",
+            ACCENT,
+            ActiveSlider::GyroDeadzone,
+            cx,
+        );
+
+        let imu_readout = div()
+            .px_3()
+            .py_2()
+            .rounded(px(8.0))
+            .bg(color(WELL_BG))
+            .border_1()
+            .border_color(color(BORDER))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .font_family(FONT_MONO)
+                    .text_color(color(TEXT_SECONDARY))
+                    .child(format!(
+                        "Gyro  P {:+.1} · Y {:+.1} · R {:+.1} °/s",
+                        snap.gyro_dps[0], snap.gyro_dps[1], snap.gyro_dps[2]
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_family(FONT_MONO)
+                    .text_color(color(TEXT_MUTED))
+                    .child(format!(
+                        "Accel X {:+.2} · Y {:+.2} · Z {:+.2} g",
+                        snap.accel_g[0], snap.accel_g[1], snap.accel_g[2]
+                    )),
+            );
+
         let motion_card = section_card("Touchpad & gyro mouse")
             .flex_1()
             .child(setting_row(
@@ -3415,6 +4703,36 @@ impl DsMasterView {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        pill_button("mr-tp-scroll", "2-finger scroll", profile.touchpad_scroll)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = this.config.active_settings_mut();
+                                s.touchpad_scroll = !s.touchpad_scroll;
+                                this.commit_config(cx);
+                            })),
+                    )
+                    .child(
+                        pill_button("mr-tp-tap", "Tap to click", profile.touchpad_tap_to_click)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = this.config.active_settings_mut();
+                                s.touchpad_tap_to_click = !s.touchpad_tap_to_click;
+                                this.commit_config(cx);
+                            })),
+                    )
+                    .child(
+                        pill_button("mr-tp-split", "Split L/R click", profile.touchpad_split_click)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = this.config.active_settings_mut();
+                                s.touchpad_split_click = !s.touchpad_split_click;
+                                this.commit_config(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
                     .flex_col()
                     .gap_3()
                     .pt_3()
@@ -3425,6 +4743,20 @@ impl DsMasterView {
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(color(TEXT))
+                                    .child("Gyro output"),
+                            )
+                            .child(gyro_outputs),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
                             .gap_2()
                             .child(
                                 div()
@@ -3452,7 +4784,47 @@ impl DsMasterView {
                                     .child("Gyro sensitivity"),
                             )
                             .child(gyro_sens),
-                    ),
+                    )
+                    .child(gyro_dz_row)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(pill_button("mr-gy-yaw", "Yaw", profile.gyro_use_yaw).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    let s = this.config.active_settings_mut();
+                                    s.gyro_use_yaw = !s.gyro_use_yaw;
+                                    this.commit_config(cx);
+                                }),
+                            ))
+                            .child(
+                                pill_button("mr-gy-roll", "Roll", profile.gyro_use_roll).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        s.gyro_use_roll = !s.gyro_use_roll;
+                                        this.commit_config(cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                pill_button("mr-gy-invx", "Invert X", profile.gyro_invert_x)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        s.gyro_invert_x = !s.gyro_invert_x;
+                                        this.commit_config(cx);
+                                    })),
+                            )
+                            .child(
+                                pill_button("mr-gy-invy", "Invert Y", profile.gyro_invert_y)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let s = this.config.active_settings_mut();
+                                        s.gyro_invert_y = !s.gyro_invert_y;
+                                        this.commit_config(cx);
+                                    })),
+                            ),
+                    )
+                    .child(imu_readout),
             );
 
         div()
@@ -3474,6 +4846,173 @@ impl DsMasterView {
                     .child(self.render_raw_output_toggle(cx)),
             )
             .child(div().flex().gap_4().child(remap_card).child(motion_card))
+    }
+
+    /// Page: Device info & hardware diagnostics
+    fn render_device_info_page(&self, cx: &mut Context<Self>) -> Div {
+        let connected = !self.handles.is_empty();
+        let snap = self.selected_snapshot().copied().unwrap_or_default();
+
+        let model_str = if !connected {
+            "Disconnected".to_owned()
+        } else if snap.is_edge {
+            "DualSense Edge".to_owned()
+        } else {
+            "DualSense".to_owned()
+        };
+        let vid_pid_str = if connected && snap.product_id != 0 {
+            format!("0x054C:0x{:04X}", snap.product_id)
+        } else {
+            "—".to_owned()
+        };
+        let mac_str = if connected && snap.mac_address != [0; 6] {
+            let m = snap.mac_address;
+            format!(
+                "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+        } else {
+            "Unavailable".to_owned()
+        };
+        let transport_str = if !connected {
+            "—"
+        } else {
+            match snap.transport {
+                Transport::Usb => "USB",
+                Transport::Bluetooth => "Bluetooth",
+            }
+        };
+        let fw_str = if connected && snap.firmware_version != 0 {
+            format!("0x{:08X}", snap.firmware_version)
+        } else {
+            "Unavailable".to_owned()
+        };
+        let hw_str = if connected && snap.hardware_version != 0 {
+            format!("0x{:08X}", snap.hardware_version)
+        } else {
+            "Unavailable".to_owned()
+        };
+        let fw_date_raw = String::from_utf8_lossy(&snap.firmware_date);
+        let fw_date_trimmed = fw_date_raw.trim_matches('\0').trim();
+        let fw_date_str = if connected && !fw_date_trimmed.is_empty() {
+            fw_date_trimmed.to_owned()
+        } else {
+            "Unavailable".to_owned()
+        };
+        let batt_str = if !connected {
+            "—".to_owned()
+        } else {
+            let st = match snap.battery_status {
+                BatteryStatus::Charging => "Charging",
+                BatteryStatus::Full => "Full",
+                BatteryStatus::Discharging => "Discharging",
+                BatteryStatus::TempOrVoltageError => "Temp/Volt Err",
+                BatteryStatus::Unknown => "Unknown",
+            };
+            format!("{}% ({st})", snap.battery_percent)
+        };
+        let poll_str = if connected {
+            format!("{:.0} Hz", snap.polling_hz)
+        } else {
+            "—".to_owned()
+        };
+        let conn_dur = if connected {
+            fmt_hms(snap.connected_secs)
+        } else {
+            "00:00:00".to_owned()
+        };
+        let idle_dur = if connected {
+            fmt_hms(snap.idle_secs)
+        } else {
+            "00:00:00".to_owned()
+        };
+        let audio_str = if !connected {
+            "—".to_owned()
+        } else {
+            let hp = if snap.headphone_connected { "Jack In" } else { "No Jack" };
+            let mic = if snap.mic_muted_hw {
+                "Mic Muted"
+            } else if snap.mic_connected {
+                "Mic Ready"
+            } else {
+                "Internal Mic"
+            };
+            format!("{hp} · {mic}")
+        };
+
+        let copy_summary = format!(
+            "Model: {model_str}\nVID:PID: {vid_pid_str}\nMAC: {mac_str}\nTransport: {transport_str}\nFirmware: {fw_str}\nBuild Date: {fw_date_str}\nHardware: {hw_str}\nBattery: {batt_str}\nPolling: {poll_str}\nConnected: {conn_dur}\nIdle: {idle_dur}\nAudio: {audio_str}"
+        );
+
+        let info_card = section_card_with_action(
+            "Hardware diagnostics",
+            subtle_button("di-copy-btn", "Copy info").on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
+                this.status_notice = Some("Device info copied to clipboard".to_owned());
+                cx.notify();
+            })),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_3()
+                .child(info_kv_tile("Controller Model", model_str, false))
+                .child(info_kv_tile("VID : PID", vid_pid_str, true))
+                .child(info_kv_tile("MAC Address", mac_str, true))
+                .child(info_kv_tile("Transport", transport_str, false))
+                .child(info_kv_tile("Firmware Version", fw_str, true))
+                .child(info_kv_tile("Firmware Build", fw_date_str, true))
+                .child(info_kv_tile("Hardware Version", hw_str, true))
+                .child(info_kv_tile("Battery", batt_str, true))
+                .child(info_kv_tile("Polling Rate", poll_str, true))
+                .child(info_kv_tile("Connection Time", conn_dur, true))
+                .child(info_kv_tile("Idle Time", idle_dur, true))
+                .child(info_kv_tile("Audio / Mic", audio_str, false)),
+        );
+
+        let caps = [
+            "Adaptive Triggers",
+            "Lightbar RGB",
+            "Player Indicator LEDs",
+            "Mic Mute LED",
+            "LED Brightness",
+            "Touchpad",
+            "Motion IMU",
+            "Dual Rumble Motors",
+        ];
+        let mut caps_grid = div().flex().flex_wrap().gap_2();
+        for cap in caps {
+            caps_grid = caps_grid.child(status_inset_pill(cap, connected));
+        }
+
+        let caps_card = section_card("Supported device features").child(caps_grid);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color(TEXT))
+                            .child("Device info"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(TEXT_MUTED))
+                            .child("Live DualSense firmware, hardware identifiers, and capability status"),
+                    ),
+            )
+            .child(info_card)
+            .child(caps_card)
     }
 
     /// Page 6: My profiles
@@ -3538,6 +5077,52 @@ impl DsMasterView {
                             ),
                     )
                     .child(
+                        subtle_button("prof-import-btn", "Import clipboard").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                let Some(raw) = cx.read_from_clipboard().and_then(|i| i.text()) else {
+                                    this.status_notice = Some("Clipboard has no text to import".to_owned());
+                                    cx.notify();
+                                    return;
+                                };
+                                let imported = toml::from_str::<NamedProfile>(&raw)
+                                    .ok()
+                                    .or_else(|| {
+                                        toml::from_str::<crate::engine::ControllerProfile>(&raw)
+                                            .ok()
+                                            .map(|settings| NamedProfile {
+                                                name: "Imported".to_owned(),
+                                                linked_exe: None,
+                                                settings,
+                                            })
+                                    });
+                                let Some(mut prof) = imported else {
+                                    this.status_notice =
+                                        Some("Clipboard is not valid DSMaster profile TOML".to_owned());
+                                    cx.notify();
+                                    return;
+                                };
+                                let base_name = if prof.name.trim().is_empty() {
+                                    "Imported".to_owned()
+                                } else {
+                                    prof.name.trim().to_owned()
+                                };
+                                let mut unique_name = base_name.clone();
+                                let mut suffix = 2usize;
+                                while this.config.profiles.iter().any(|p| p.name == unique_name) {
+                                    unique_name = format!("{base_name} ({suffix})");
+                                    suffix += 1;
+                                }
+                                prof.name = unique_name.clone();
+                                this.config.profiles.push(prof);
+                                this.config.active_profile = unique_name.clone();
+                                this.sync_picker_hsv();
+                                this.commit_config(cx);
+                                this.status_notice = Some(format!("Imported profile '{unique_name}'"));
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
                         primary_cta_button(
                             "prof-create-btn",
                             plus_icon(16.0, ACCENT_FG),
@@ -3557,6 +5142,9 @@ impl DsMasterView {
             let name_del = p.name.clone();
             let name_link = p.name.clone();
             let name_unlink = p.name.clone();
+            let name_dup = p.name.clone();
+            let name_rst = p.name.clone();
+            let prof_for_copy = p.clone();
 
             let emu_tag = match p.settings.emulation {
                 EmulationMode::Xbox360 => "Xbox 360",
@@ -3672,7 +5260,14 @@ impl DsMasterView {
                                 .bg(color(WELL_BG))
                                 .text_xs()
                                 .text_color(color(TEXT_SECONDARY))
-                                .child(p.settings.button_preset.label()),
+                                .child({
+                                    let n = p.settings.button_map.custom_count();
+                                    if n == 0 {
+                                        "Default buttons".to_owned()
+                                    } else {
+                                        format!("{n} remapped")
+                                    }
+                                }),
                         ),
                 );
 
@@ -3730,7 +5325,72 @@ impl DsMasterView {
                 )
             };
 
-            let mut right_acts = div().flex().items_center().gap_2();
+            let mut right_acts = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    subtle_button(SharedString::from(format!("pc-dup-{idx}")), "Duplicate")
+                        .tooltip(text_tooltip("Duplicate profile"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let Some(src) = this
+                                .config
+                                .profiles
+                                .iter()
+                                .find(|pr| pr.name == name_dup)
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            let mut n = 2usize;
+                            let mut cand = format!("{} ({n})", src.name);
+                            while this.config.profiles.iter().any(|pr| pr.name == cand) {
+                                n += 1;
+                                cand = format!("{} ({n})", src.name);
+                            }
+                            this.config.profiles.push(NamedProfile {
+                                name: cand.clone(),
+                                linked_exe: None,
+                                settings: src.settings,
+                            });
+                            this.config.active_profile = cand;
+                            this.sync_picker_hsv();
+                            this.commit_config(cx);
+                        })),
+                )
+                .child(
+                    subtle_button(SharedString::from(format!("pc-copy-{idx}")), "Copy TOML")
+                        .tooltip(text_tooltip("Copy profile TOML to clipboard"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            match toml::to_string_pretty(&prof_for_copy) {
+                                Ok(text) => {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    this.status_notice = Some(format!(
+                                        "Copied '{}' TOML to clipboard",
+                                        prof_for_copy.name
+                                    ));
+                                }
+                                Err(e) => {
+                                    this.status_notice = Some(format!("Export failed: {e}"));
+                                }
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    subtle_button(SharedString::from(format!("pc-rst-{idx}")), "Reset")
+                        .tooltip(text_tooltip("Reset profile settings to defaults"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(pr) =
+                                this.config.profiles.iter_mut().find(|pr| pr.name == name_rst)
+                            {
+                                pr.settings = crate::engine::ControllerProfile::default();
+                            }
+                            this.sync_picker_hsv();
+                            this.commit_config(cx);
+                        })),
+                );
             if let Some(exe) = can_link {
                 let exe_clone = exe.clone();
                 right_acts = right_acts.child(
@@ -4223,7 +5883,10 @@ impl Render for DsMasterView {
         self.read_snapshots();
 
         let is_hidden = self.window_ctl.window_hidden.load(Ordering::Acquire);
-        if !is_hidden && !self.handles.is_empty() && self.page.shows_controller_stage() {
+        if !is_hidden
+            && !self.handles.is_empty()
+            && (self.page.shows_controller_stage() || self.page == ActivePage::DeviceInfo)
+        {
             window.request_animation_frame();
         }
 
@@ -4235,8 +5898,10 @@ impl Render for DsMasterView {
             ActivePage::Profiles => self.render_profiles_page(cx),
             ActivePage::Sticks => self.render_sticks_page(cx),
             ActivePage::Triggers => self.render_triggers_page(cx),
+            ActivePage::Audio => self.render_audio_page(cx),
             ActivePage::Lighting => self.render_lighting_page(cx),
             ActivePage::MotionRemap => self.render_motion_remap_page(cx),
+            ActivePage::DeviceInfo => self.render_device_info_page(cx),
             ActivePage::Settings => self.render_settings_page(cx),
         };
 

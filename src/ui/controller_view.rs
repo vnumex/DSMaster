@@ -9,7 +9,7 @@ use super::dualsense_paths::{
     TRIGGER_R2, WING_LEFT, WING_RIGHT,
 };
 use super::theme::{
-    ACCENT, ACCENT_SOLID, BORDER, BORDER_STRONG, TEXT, TEXT_SECONDARY, WARN, WELL_BG, ZONE_BLUE,
+    ACCENT, ACCENT_SOLID, BORDER_STRONG, TEXT, TEXT_SECONDARY, WARN, WELL_BG, ZONE_BLUE,
     color, color_alpha, lerp_rgb,
 };
 use crate::engine::TelemetrySnapshot;
@@ -228,19 +228,18 @@ fn paint_stroke(
     }
 }
 
-/// Flanking vertical L2/R2 analog travel & rumble gauges.
+/// Flanking vertical L2/R2 analog travel gauges.
 fn paint_side_gauge(
     window: &mut Window,
     xf: &CanvasXform,
     is_right: bool,
     trigger_val: u8,
-    rumble_val: u8,
     highlighted: bool,
 ) {
     let x = if is_right { 398.0 } else { 20.0 };
     let y = 34.0;
     let w = 12.0;
-    let h = 110.0;
+    let h = 148.0;
 
     paint_fill(window, color(WELL_BG), |b| {
         add_rounded_rect_abs(b, xf, x, y, w, h, 5.0);
@@ -268,23 +267,6 @@ fn paint_side_gauge(
         let fy = y + h - 2.0 - fh;
         paint_fill(window, color(ACCENT), |b| {
             add_rounded_rect_abs(b, xf, x + 2.0, fy, w - 4.0, fh.max(3.0), 3.0);
-        });
-    }
-
-    let ry = y + h + 10.0;
-    let rh = 38.0;
-    paint_fill(window, color(WELL_BG), |b| {
-        add_rounded_rect_abs(b, xf, x + 2.0, ry, w - 4.0, rh, 4.0);
-    });
-    paint_stroke(window, xf.len(0.9), color(BORDER), |b| {
-        add_rounded_rect_abs(b, xf, x + 2.0, ry, w - 4.0, rh, 4.0);
-    });
-    let r_ratio = (rumble_val as f32 / 255.0).clamp(0.0, 1.0);
-    if r_ratio > 0.01 {
-        let fh = (rh - 3.0) * r_ratio;
-        let fy = ry + rh - 1.5 - fh;
-        paint_fill(window, color(WARN), |b| {
-            add_rounded_rect_abs(b, xf, x + 3.5, fy, w - 7.0, fh.max(2.5), 2.5);
         });
     }
 }
@@ -708,9 +690,9 @@ fn paint_dualsense(
     let hl_light = state.highlight == HighlightZone::Lighting;
     let hl_btns = state.highlight == HighlightZone::Buttons;
 
-    // 0. Flanking L2 / R2 analog travel & rumble gauges
-    paint_side_gauge(window, &xf, false, snap.l2_analog, snap.rumble_large, hl_trig);
-    paint_side_gauge(window, &xf, true, snap.r2_analog, snap.rumble_small, hl_trig);
+    // 0. Flanking L2 / R2 analog travel gauges
+    paint_side_gauge(window, &xf, false, snap.l2_analog, hl_trig);
+    paint_side_gauge(window, &xf, true, snap.r2_analog, hl_trig);
 
     // 1. Multi-pass studio grounding shadow beneath DualSense silhouette
     for (dy, alpha) in [(26.0, 0x0A), (18.0, 0x10), (11.0, 0x17), (5.0, 0x1E)] {
@@ -1068,11 +1050,20 @@ fn paint_dualsense(
 
     // Subtle metallic Fn paddles beneath stick sockets when DualSense Edge is detected
     if is_edge {
-        for x in [276.0, 597.0] {
-            paint_fill(window, grad(180.0, 0x454D5C, 0x242933), |p| {
+        for (x, pressed) in [
+            (276.0, b.contains(DualSenseButtons::EDGE_FN1) || b.contains(DualSenseButtons::EDGE_PADDLE_L)),
+            (597.0, b.contains(DualSenseButtons::EDGE_FN2) || b.contains(DualSenseButtons::EDGE_PADDLE_R)),
+        ] {
+            let fill = if pressed {
+                grad(180.0, ACCENT, ACCENT_SOLID)
+            } else {
+                grad(180.0, 0x454D5C, 0x242933)
+            };
+            let stroke_col = if pressed { ACCENT } else { 0x636C7E };
+            paint_fill(window, fill, |p| {
                 add_rounded_rect_ds(p, &xf, x, 502.0, 39.0, 14.0, 5.0);
             });
-            paint_stroke(window, xf.ds_len(1.8), color(0x636C7E), |p| {
+            paint_stroke(window, xf.ds_len(1.8), color(stroke_col), |p| {
                 add_rounded_rect_ds(p, &xf, x, 502.0, 39.0, 14.0, 5.0);
             });
         }
