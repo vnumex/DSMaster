@@ -760,6 +760,10 @@ pub struct ControllerProfile {
     #[serde(default = "default_bt_haptics_gain")]
     pub bt_haptics_gain: f32,
     pub virtual_audio_device: bool,
+    #[serde(default)]
+    pub virtual_speaker_device: bool,
+    #[serde(default)]
+    pub virtual_mic_device: bool,
     #[serde(default = "default_true")]
     pub bt_mic_enabled: bool,
     #[serde(default = "default_one")]
@@ -815,6 +819,8 @@ impl Default for ControllerProfile {
             bt_haptics_enabled: false,
             bt_haptics_gain: 0.75,
             virtual_audio_device: false,
+            virtual_speaker_device: false,
+            virtual_mic_device: false,
             bt_mic_enabled: true,
             bt_mic_gain: 1.0,
         }
@@ -822,6 +828,11 @@ impl Default for ControllerProfile {
 }
 
 impl ControllerProfile {
+    #[inline]
+    pub fn virtual_audio_any(&self) -> bool {
+        self.virtual_speaker_device || self.virtual_mic_device
+    }
+
     #[inline]
     pub fn left_trigger_tuning(&self) -> TriggerTuning {
         self.triggers

@@ -702,7 +702,7 @@ fn bt_audio_worker_loop(
             .haptics_test_active
             .store(hap_test_on, Ordering::Release);
 
-        let want_mic = prof.virtual_audio_device
+        let want_mic = prof.virtual_mic_device
             && bridge.mic_endpoint_open.load(Ordering::Acquire)
             && cloak_enabled.load(Ordering::Acquire);
 
@@ -733,9 +733,9 @@ fn bt_audio_worker_loop(
             telemetry.mic_level.store(0, Ordering::Release);
         }
 
-        let want_wasapi =
-            prof.bt_haptics_enabled && !bridge.speaker_endpoint_open.load(Ordering::Acquire);
-        let want_virt_spk = prof.virtual_audio_device;
+        let want_wasapi = prof.bt_haptics_enabled
+            && !(prof.virtual_speaker_device && bridge.speaker_endpoint_open.load(Ordering::Acquire));
+        let want_virt_spk = prof.virtual_speaker_device;
         if !want_wasapi && !want_virt_spk && !spk_test_on && !hap_test_on {
             if wasapi.is_some() {
                 wasapi = None;

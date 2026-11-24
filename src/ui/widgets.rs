@@ -512,12 +512,13 @@ pub fn meter_row_with_width(
 ) -> Div {
     let pct = value as f32 / 255.0;
     div()
+        .w_full()
         .flex()
         .items_center()
         .gap_3()
         .child(
             div()
-                .w(px(label_w))
+                .min_w(px(label_w))
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .text_size(px(13.0))
@@ -527,6 +528,7 @@ pub fn meter_row_with_width(
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.0))
                 .h(px(8.0))
                 .rounded_full()
                 .bg(color(WELL_BG))
@@ -544,6 +546,7 @@ pub fn meter_row_with_width(
         .child(
             div()
                 .w(px(36.0))
+                .flex_shrink_0()
                 .text_right()
                 .text_size(px(13.0))
                 .font_family(FONT_MONO)

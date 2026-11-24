@@ -3532,7 +3532,7 @@ impl DsMasterView {
             status_inset_pill("Requires usbip-win2", false)
         } else if snap.virtual_audio_attached {
             status_inset_pill("Active · Windows Audio", true)
-        } else if profile.virtual_audio_device {
+        } else if profile.virtual_audio_any() {
             status_inset_pill("Attaching · Windows Audio", false)
         } else {
             status_inset_pill("Disabled", false)
@@ -3605,31 +3605,7 @@ impl DsMasterView {
             .is_some_and(Engine::is_cloak_enabled);
 
         let mut virtual_audio_card =
-            section_card_with_action("Windows audio device (Speaker & Mic)", va_status_pill)
-                .child(setting_row(
-                    "Enable DualSense audio device",
-                    "Registers Speakers & Microphone (DualSense Wireless Audio) in Windows Sound via usbip-win2",
-                    toggle_switch("va-enable-toggle", profile.virtual_audio_device).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            let next_on = {
-                                let s = this.config.active_settings_mut();
-                                s.virtual_audio_device = !s.virtual_audio_device;
-                                s.virtual_audio_device
-                            };
-                            if next_on && this.hidhide_available {
-                                let emu = this.config.active_settings().emulation;
-                                if emu != EmulationMode::None {
-                                    if let Some(eng) = &this.engine {
-                                        if !eng.is_cloak_enabled() && eng.set_cloak_enabled(true).is_ok() {
-                                            this.config.cloak_physical = true;
-                                        }
-                                    }
-                                }
-                            }
-                            this.commit_config(cx);
-                        }),
-                    ),
-                ));
+            section_card_with_action("Windows audio device (Speaker & Mic)", va_status_pill);
 
         if !self.vds_available {
             virtual_audio_card = virtual_audio_card.child(
@@ -3660,7 +3636,7 @@ impl DsMasterView {
             );
         }
 
-        if profile.virtual_audio_device && !cloak_on {
+        if profile.virtual_mic_device && !cloak_on {
             let can_cloak_now = self.hidhide_available && profile.emulation != EmulationMode::None;
             let mut cloak_warn = div()
                 .flex()
@@ -3695,83 +3671,219 @@ impl DsMasterView {
             virtual_audio_card = virtual_audio_card.child(cloak_warn);
         }
 
-        virtual_audio_card = virtual_audio_card
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(status_inset_pill(
-                        "Speakers (DualSense Wireless Audio)",
-                        snap.virtual_speaker_active,
-                    ))
-                    .child(status_inset_pill(
-                        "Microphone (DualSense Wireless Audio)",
-                        snap.virtual_mic_active,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_6()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(color(BORDER))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(color(TEXT_SECONDARY))
-                                            .child("Output route"),
+        virtual_audio_card = virtual_audio_card.child(
+            div()
+                .flex()
+                .gap_6()
+                .pt_3()
+                .border_t_1()
+                .border_color(color(BORDER))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .pb_3()
+                                .border_b_1()
+                                .border_color(color(BORDER))
+                                .child(setting_row(
+                                    "Enable DualSense speaker",
+                                    "Registers Speakers endpoint in Windows Sound",
+                                    toggle_switch(
+                                        "va-speaker-toggle",
+                                        profile.virtual_speaker_device,
                                     )
-                                    .child(route_pills),
-                            )
-                            .child(spk_vol_row)
-                            .child(meter_row("Speaker output", snap.bt_speaker_level, ACCENT))
-                            .child(
-                                div().flex().justify_end().child(
-                                    subtle_button("bt-test-speaker", "Test chime").on_click(
-                                        cx.listener(|this, _, _, _| {
-                                            if let Some(eng) = &this.engine {
-                                                eng.trigger_test_bt_speaker();
-                                            }
-                                        }),
-                                    ),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        {
+                                            let s = this.config.active_settings_mut();
+                                            s.virtual_speaker_device = !s.virtual_speaker_device;
+                                            s.virtual_audio_device =
+                                                s.virtual_speaker_device || s.virtual_mic_device;
+                                        }
+                                        this.commit_config(cx);
+                                    })),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(color(TEXT_SECONDARY))
+                                        .child("Output route"),
+                                )
+                                .child(route_pills),
+                        )
+                        .child(spk_vol_row)
+                        .child(meter_row("Speaker output", snap.bt_speaker_level, ACCENT))
+                        .child(
+                            div().flex().justify_end().child(
+                                subtle_button("bt-test-speaker", "Test chime").on_click(
+                                    cx.listener(|this, _, _, _| {
+                                        if let Some(eng) = &this.engine {
+                                            eng.trigger_test_bt_speaker();
+                                        }
+                                    }),
                                 ),
                             ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(mic_gain_row)
-                            .child(meter_row("Microphone input", snap.bt_mic_level, SUCCESS))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color(if snap.mic_muted_hw { WARN } else { TEXT_MUTED }))
-                                    .child(if snap.mic_muted_hw {
-                                        "Hardware mic mute is active on the controller."
-                                    } else {
-                                        "Opens automatically when an app records from the DualSense microphone."
-                                    }),
-                            ),
-                    ),
-            );
+                        ),
+                )
+                .child(div().w(px(1.0)).bg(color(BORDER)))
+                .child({
+                    let (mic_bg, mic_border, mic_icon, mic_text_col, mic_label) =
+                        if !profile.virtual_mic_device {
+                            (
+                                WELL_BG,
+                                BORDER,
+                                info_icon(16.0, TEXT_MUTED),
+                                TEXT_MUTED,
+                                "Disabled",
+                            )
+                        } else if snap.mic_muted_hw {
+                            (
+                                WARN_SURFACE,
+                                WARN_BORDER,
+                                info_icon(16.0, WARN),
+                                WARN,
+                                "Muted on controller",
+                            )
+                        } else if snap.bt_mic_streaming || snap.virtual_mic_active {
+                            (
+                                WELL_BG,
+                                BORDER,
+                                check_icon(16.0, SUCCESS),
+                                TEXT,
+                                "Recording · Active",
+                            )
+                        } else if snap.virtual_audio_attached {
+                            (
+                                WELL_BG,
+                                BORDER,
+                                check_icon(16.0, SUCCESS),
+                                TEXT_SECONDARY,
+                                "Ready · Standby",
+                            )
+                        } else if !snap.active || snap.transport != Transport::Bluetooth {
+                            (
+                                WELL_BG,
+                                BORDER,
+                                info_icon(16.0, TEXT_MUTED),
+                                TEXT_MUTED,
+                                "Connect via Bluetooth",
+                            )
+                        } else {
+                            (
+                                WELL_BG,
+                                BORDER,
+                                info_icon(16.0, TEXT_MUTED),
+                                TEXT_MUTED,
+                                "Inactive",
+                            )
+                        };
+
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .pb_3()
+                                .border_b_1()
+                                .border_color(color(BORDER))
+                                .child(setting_row(
+                                    "Enable DualSense microphone",
+                                    "Registers Microphone endpoint in Windows Sound",
+                                    toggle_switch("va-mic-toggle", profile.virtual_mic_device)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let next_on = {
+                                                let s = this.config.active_settings_mut();
+                                                s.virtual_mic_device = !s.virtual_mic_device;
+                                                s.virtual_audio_device = s.virtual_speaker_device
+                                                    || s.virtual_mic_device;
+                                                s.virtual_mic_device
+                                            };
+                                            if next_on && this.hidhide_available {
+                                                let emu = this.config.active_settings().emulation;
+                                                if emu != EmulationMode::None {
+                                                    if let Some(eng) = &this.engine {
+                                                        if !eng.is_cloak_enabled()
+                                                            && eng.set_cloak_enabled(true).is_ok()
+                                                        {
+                                                            this.config.cloak_physical = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            this.commit_config(cx);
+                                        })),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(color(TEXT_SECONDARY))
+                                        .child("Microphone status"),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(32.0))
+                                        .w_full()
+                                        .px_3()
+                                        .rounded(px(8.0))
+                                        .bg(color(mic_bg))
+                                        .border_1()
+                                        .border_color(color(mic_border))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(13.0))
+                                        .child(mic_icon)
+                                        .child(
+                                            div()
+                                                .whitespace_nowrap()
+                                                .text_color(color(mic_text_col))
+                                                .child(mic_label),
+                                        ),
+                                ),
+                        )
+                        .child(mic_gain_row)
+                        .child(meter_row("Microphone input", snap.bt_mic_level, SUCCESS))
+                        .child(
+                            div()
+                                .min_h(px(32.0))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(color(if snap.mic_muted_hw {
+                                            WARN
+                                        } else {
+                                            TEXT_MUTED
+                                        }))
+                                        .child(if snap.mic_muted_hw {
+                                            "Press the mute button on the controller to unmute."
+                                        } else {
+                                            "Opens automatically when an app records from the DualSense microphone."
+                                        }),
+                                ),
+                        )
+                }),
+        );
 
         let haptics_card = section_card_with_action("Bluetooth HD haptics", bt_status_pill)
             .child(setting_row(

@@ -17,7 +17,7 @@ use super::processing::{ProcessedInput, TurboState, apply_turbo_state, process_i
 use super::profile::{ControllerProfile, LightbarMode, MicMuteLedOverride};
 use super::seqlock::SeqLock;
 use super::telemetry::TelemetrySnapshot;
-use crate::emu::audio_device::{SharedAudioBridge, VirtualAudioDevice};
+use crate::emu::audio_device::{SharedAudioBridge, VirtualAudioDevice, VirtualAudioMode};
 use crate::emu::dualsense::VirtualDualSenseConfig;
 use crate::emu::vigem::ds4::DualShock4Target;
 use crate::emu::vigem::x360::Xbox360Target;
@@ -261,7 +261,7 @@ fn session_loop(
         (None, None)
     };
     let mut virtual_audio: Option<VirtualAudioDevice> = None;
-    let mut virtual_audio_attempted = false;
+    let mut virtual_audio_attempted: Option<VirtualAudioMode> = None;
 
     if initial_prof.override_lightbar
         || initial_prof.override_triggers
@@ -463,32 +463,23 @@ fn session_loop(
                     .as_ref()
                     .is_some_and(|w| w.telemetry.haptics_test_active.load(Ordering::Acquire));
                 let bt_spk_active = info.transport == Transport::Bluetooth
-                    && (prof.virtual_audio_device || bt_spk_test_active);
+                    && (prof.virtual_speaker_device || bt_spk_test_active);
                 let bt_hap_active = info.transport == Transport::Bluetooth
                     && (prof.bt_haptics_enabled || bt_hap_test_active);
                 let bt_mic_active = info.transport == Transport::Bluetooth
-                    && prof.virtual_audio_device
+                    && prof.virtual_mic_device
                     && cloak_enabled.load(Ordering::Acquire)
                     && bt_audio_bridge
                         .as_ref()
                         .is_some_and(|b| b.mic_endpoint_open.load(Ordering::Acquire));
                 let bt_any_audio = bt_spk_active || bt_hap_active || bt_mic_active;
-                if let Some(br) = bt_audio_bridge.as_ref() {
-                    if prof.virtual_audio_device {
-                        if virtual_audio.is_none() && !virtual_audio_attempted {
-                            virtual_audio_attempted = true;
-                            match VirtualAudioDevice::spawn(Arc::clone(br)) {
-                                Ok(dev) => virtual_audio = Some(dev),
-                                Err(e) => warn!(error = %e, "Failed to attach Virtual DualSense Audio"),
-                            }
-                        }
-                    } else {
-                        if virtual_audio.is_some() {
-                            virtual_audio = None;
-                        }
-                        virtual_audio_attempted = false;
-                    }
-                }
+                sync_virtual_audio(
+                    &bt_audio_bridge,
+                    &mut virtual_audio,
+                    &mut virtual_audio_attempted,
+                    prof.virtual_speaker_device,
+                    prof.virtual_mic_device,
+                );
                 let bt_vol_norm = prof.bt_speaker_volume;
                 let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
                 let bt_hp_vol_byte = prof.bt_audio_route.effective_headphone_volume(bt_vol_norm);
@@ -777,25 +768,16 @@ fn session_loop(
                     .is_some_and(|w| w.telemetry.haptics_test_active.load(Ordering::Acquire));
                 let bt_any_audio = info.transport == Transport::Bluetooth
                     && (prof.bt_haptics_enabled
-                        || prof.virtual_audio_device
+                        || prof.virtual_audio_any()
                         || bt_spk_test_active
                         || bt_hap_test_active);
-                if let Some(br) = bt_audio_bridge.as_ref() {
-                    if prof.virtual_audio_device {
-                        if virtual_audio.is_none() && !virtual_audio_attempted {
-                            virtual_audio_attempted = true;
-                            match VirtualAudioDevice::spawn(Arc::clone(br)) {
-                                Ok(dev) => virtual_audio = Some(dev),
-                                Err(e) => warn!(error = %e, "Failed to attach Virtual DualSense Audio"),
-                            }
-                        }
-                    } else {
-                        if virtual_audio.is_some() {
-                            virtual_audio = None;
-                        }
-                        virtual_audio_attempted = false;
-                    }
-                }
+                sync_virtual_audio(
+                    &bt_audio_bridge,
+                    &mut virtual_audio,
+                    &mut virtual_audio_attempted,
+                    prof.virtual_speaker_device,
+                    prof.virtual_mic_device,
+                );
                 if bt_any_audio {
                     let bt_vol_norm = prof.bt_speaker_volume;
                     let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
@@ -963,6 +945,40 @@ fn session_loop(
     telemetry.write(final_snap);
     topology_version.fetch_add(1, Ordering::Release);
     info!(path = %info.device_path, "Controller session stopped");
+}
+
+fn sync_virtual_audio(
+    bridge: &Option<Arc<SharedAudioBridge>>,
+    virtual_audio: &mut Option<VirtualAudioDevice>,
+    attempted: &mut Option<VirtualAudioMode>,
+    speaker: bool,
+    mic: bool,
+) {
+    let Some(br) = bridge.as_ref() else {
+        return;
+    };
+    let desired = VirtualAudioMode::from_flags(speaker, mic);
+    match desired {
+        Some(mode) => {
+            if virtual_audio.as_ref().is_some_and(|d| d.mode() != mode) {
+                *virtual_audio = None;
+                *attempted = None;
+            }
+            if virtual_audio.is_none() && *attempted != Some(mode) {
+                *attempted = Some(mode);
+                match VirtualAudioDevice::spawn(Arc::clone(br), mode) {
+                    Ok(dev) => *virtual_audio = Some(dev),
+                    Err(e) => warn!(error = %e, ?mode, "Failed to attach Virtual DualSense Audio"),
+                }
+            }
+        }
+        None => {
+            if virtual_audio.is_some() {
+                *virtual_audio = None;
+            }
+            *attempted = None;
+        }
+    }
 }
 
 fn build_virtual_dualsense_config(

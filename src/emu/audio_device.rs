@@ -52,9 +52,120 @@ const EP_ISO_IN: u32 = 2;
 
 const AUDIO_VID: u16 = 0x1209;
 const AUDIO_PID: u16 = 0xD5A0;
+const AUDIO_SPEAKER_PID: u16 = 0xD5A1;
+const AUDIO_MIC_PID: u16 = 0xD5A2;
 const AUDIO_MANUFACTURER: &str = "DSMaster";
 const AUDIO_PRODUCT: &str = "DualSense Wireless Audio";
 const AUDIO_SERIAL: &str = "DSMASTER-VAUDIO-01";
+const AUDIO_SPEAKER_SERIAL: &str = "DSMASTER-VAUDIO-SPK";
+const AUDIO_MIC_SERIAL: &str = "DSMASTER-VAUDIO-MIC";
+
+/// Which virtual Windows audio endpoints are exposed over USB/IP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualAudioMode {
+    SpeakerOnly,
+    MicOnly,
+    Both,
+}
+
+impl VirtualAudioMode {
+    #[inline]
+    pub const fn from_flags(speaker: bool, mic: bool) -> Option<Self> {
+        match (speaker, mic) {
+            (true, true) => Some(Self::Both),
+            (true, false) => Some(Self::SpeakerOnly),
+            (false, true) => Some(Self::MicOnly),
+            (false, false) => None,
+        }
+    }
+
+    #[inline]
+    pub const fn has_speaker(self) -> bool {
+        matches!(self, Self::SpeakerOnly | Self::Both)
+    }
+
+    #[inline]
+    pub const fn has_mic(self) -> bool {
+        matches!(self, Self::MicOnly | Self::Both)
+    }
+
+    #[inline]
+    const fn pid(self) -> u16 {
+        match self {
+            Self::Both => AUDIO_PID,
+            Self::SpeakerOnly => AUDIO_SPEAKER_PID,
+            Self::MicOnly => AUDIO_MIC_PID,
+        }
+    }
+
+    #[inline]
+    const fn serial(self) -> &'static str {
+        match self {
+            Self::Both => AUDIO_SERIAL,
+            Self::SpeakerOnly => AUDIO_SPEAKER_SERIAL,
+            Self::MicOnly => AUDIO_MIC_SERIAL,
+        }
+    }
+
+    #[inline]
+    const fn num_interfaces(self) -> u8 {
+        match self {
+            Self::Both => 3,
+            Self::SpeakerOnly | Self::MicOnly => 2,
+        }
+    }
+
+    #[inline]
+    const fn speaker_iface(self) -> Option<usize> {
+        match self {
+            Self::Both | Self::SpeakerOnly => Some(1),
+            Self::MicOnly => None,
+        }
+    }
+
+    #[inline]
+    const fn mic_iface(self) -> Option<usize> {
+        match self {
+            Self::Both => Some(2),
+            Self::MicOnly => Some(1),
+            Self::SpeakerOnly => None,
+        }
+    }
+
+    #[inline]
+    const fn device_descriptor(self) -> [u8; 18] {
+        let pid = self.pid();
+        [
+            18,
+            0x01,
+            0x10,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            64,
+            (AUDIO_VID & 0xFF) as u8,
+            (AUDIO_VID >> 8) as u8,
+            (pid & 0xFF) as u8,
+            (pid >> 8) as u8,
+            0x00,
+            0x01,
+            1,
+            2,
+            3,
+            1,
+        ]
+    }
+
+    #[inline]
+    const fn config_descriptor(self) -> &'static [u8] {
+        match self {
+            Self::Both => &AUDIO_CONFIG_DESCRIPTOR,
+            Self::SpeakerOnly => &AUDIO_SPEAKER_CONFIG_DESCRIPTOR,
+            Self::MicOnly => &AUDIO_MIC_CONFIG_DESCRIPTOR,
+        }
+    }
+}
 
 const RING_CAP_FRAMES: usize = 9600;
 const RING_LAG_LIMIT: usize = 4800;
@@ -250,6 +361,64 @@ pub const AUDIO_CONFIG_DESCRIPTOR: [u8; 193] = [
     7, 0x25, 0x01, 0x01, 0, 0, 0,
 ];
 
+/// Clean-room UAC 1.0 Configuration Descriptor for Speaker-only mode (110 bytes total).
+pub const AUDIO_SPEAKER_CONFIG_DESCRIPTOR: [u8; 110] = [
+    // Configuration Descriptor (9B)
+    9, 0x02, 110, 0, 2, 1, 0, 0x80, 0xFA,
+    // Interface 0: AudioControl (9B)
+    9, 0x04, 0, 0, 0, 0x01, 0x01, 0x00, 0,
+    // Class-Specific AC Interface Header (9B, wTotalLength = 40, bInCollection = 1, baInterfaceNr = [1])
+    9, 0x24, 0x01, 0x00, 0x01, 40, 0, 1, 1,
+    // Input Terminal 1: USB Streaming -> Speaker (12B)
+    12, 0x24, 0x02, 1, 0x01, 0x01, 0, 2, 0x03, 0x00, 0, 0,
+    // Feature Unit 2: Speaker Mute + Volume (10B)
+    10, 0x24, 0x06, 2, 1, 1, 0x03, 0x00, 0x00, 0,
+    // Output Terminal 3: Speaker (9B)
+    9, 0x24, 0x03, 3, 0x01, 0x03, 0, 2, 0,
+
+    // Interface 1 Alt 0: Speaker Zero-Bandwidth (9B)
+    9, 0x04, 1, 0, 0, 0x01, 0x02, 0x00, 0,
+    // Interface 1 Alt 1: Speaker Active (9B)
+    9, 0x04, 1, 1, 1, 0x01, 0x02, 0x00, 0,
+    // Class-Specific AS General (7B, bTerminalLink = 1, PCM = 0x0001)
+    7, 0x24, 0x01, 1, 1, 0x01, 0x00,
+    // Class-Specific AS Format Type I (11B: 2ch, 2B subframe, 16-bit, 48000 Hz)
+    11, 0x24, 0x02, 0x01, 2, 2, 16, 1, 0x80, 0xBB, 0x00,
+    // Standard ISO OUT Endpoint 0x01 (9B: Iso + Adaptive = 0x09, wMaxPacketSize = 192, bInterval = 1)
+    9, 0x05, 0x01, 0x09, 192, 0, 1, 0, 0,
+    // Class-Specific AS Isochronous Audio Data Endpoint (7B)
+    7, 0x25, 0x01, 0x01, 0, 0, 0,
+];
+
+/// Clean-room UAC 1.0 Configuration Descriptor for Microphone-only mode (109 bytes total).
+pub const AUDIO_MIC_CONFIG_DESCRIPTOR: [u8; 109] = [
+    // Configuration Descriptor (9B)
+    9, 0x02, 109, 0, 2, 1, 0, 0x80, 0xFA,
+    // Interface 0: AudioControl (9B)
+    9, 0x04, 0, 0, 0, 0x01, 0x01, 0x00, 0,
+    // Class-Specific AC Interface Header (9B, wTotalLength = 39, bInCollection = 1, baInterfaceNr = [1])
+    9, 0x24, 0x01, 0x00, 0x01, 39, 0, 1, 1,
+    // Input Terminal 4: Microphone (12B)
+    12, 0x24, 0x02, 4, 0x01, 0x02, 0, 1, 0x00, 0x00, 0, 0,
+    // Feature Unit 5: Microphone Mute + Volume (9B)
+    9, 0x24, 0x06, 5, 4, 1, 0x03, 0x00, 0,
+    // Output Terminal 6: Microphone -> USB Streaming (9B)
+    9, 0x24, 0x03, 6, 0x01, 0x01, 0, 5, 0,
+
+    // Interface 1 Alt 0: Microphone Zero-Bandwidth (9B)
+    9, 0x04, 1, 0, 0, 0x01, 0x02, 0x00, 0,
+    // Interface 1 Alt 1: Microphone Active (9B)
+    9, 0x04, 1, 1, 1, 0x01, 0x02, 0x00, 0,
+    // Class-Specific AS General (7B, bTerminalLink = 6, PCM = 0x0001)
+    7, 0x24, 0x01, 6, 1, 0x01, 0x00,
+    // Class-Specific AS Format Type I (11B: 1ch, 2B subframe, 16-bit, 48000 Hz)
+    11, 0x24, 0x02, 0x01, 1, 2, 16, 1, 0x80, 0xBB, 0x00,
+    // Standard ISO IN Endpoint 0x82 (9B: Iso + Async = 0x05, wMaxPacketSize = 96, bInterval = 1)
+    9, 0x05, 0x82, 0x05, 96, 0, 1, 0, 0,
+    // Class-Specific AS Isochronous Audio Data Endpoint (7B)
+    7, 0x25, 0x01, 0x01, 0, 0, 0,
+];
+
 #[derive(Debug, Clone, Copy)]
 struct IsoPacketDesc {
     offset: u32,
@@ -341,6 +510,7 @@ fn db_q8_to_linear(vol_q8: i16) -> f32 {
 }
 
 struct AudioServerShared {
+    mode: VirtualAudioMode,
     bridge: Arc<SharedAudioBridge>,
     control: Mutex<UacControlState>,
     iso_out_pending: Mutex<VecDeque<PendingIsoUrb>>,
@@ -395,13 +565,13 @@ impl AudioServerShared {
                     let desc_type = (w_value >> 8) as u8;
                     let desc_idx = (w_value & 0xFF) as u8;
                     let mut bytes = match desc_type {
-                        0x01 => AUDIO_DEVICE_DESCRIPTOR.to_vec(),
-                        0x02 => AUDIO_CONFIG_DESCRIPTOR.to_vec(),
+                        0x01 => self.mode.device_descriptor().to_vec(),
+                        0x02 => self.mode.config_descriptor().to_vec(),
                         0x03 => match desc_idx {
                             0 => vec![4, 0x03, 0x09, 0x04],
                             1 => encode_utf16_string(AUDIO_MANUFACTURER),
                             2 => encode_utf16_string(AUDIO_PRODUCT),
-                            3 => encode_utf16_string(AUDIO_SERIAL),
+                            3 => encode_utf16_string(self.mode.serial()),
                             _ => return (ERR_EPIPE, 0, Vec::new()),
                         },
                         _ => return (ERR_EPIPE, 0, Vec::new()),
@@ -438,16 +608,16 @@ impl AudioServerShared {
                 0x0B => {
                     let iface = (w_index & 0xFF) as usize;
                     let alt = (w_value & 0xFF) as u8;
-                    if iface < 3 {
+                    if iface < self.mode.num_interfaces() as usize {
                         self.control.lock().alt_settings[iface] = alt;
-                        if iface == 1 {
+                        if Some(iface) == self.mode.speaker_iface() {
                             self.bridge
                                 .speaker_endpoint_open
                                 .store(alt == 1, Ordering::Release);
                             if alt == 0 {
                                 self.bridge.clear_speaker();
                             }
-                        } else if iface == 2 {
+                        } else if Some(iface) == self.mode.mic_iface() {
                             self.bridge
                                 .mic_endpoint_open
                                 .store(alt == 1, Ordering::Release);
@@ -490,7 +660,9 @@ impl AudioServerShared {
                 }
 
                 // Feature Unit 2 (Speaker) and Feature Unit 5 (Microphone)
-                if matches!(unit_id, 2 | 5) {
+                if (unit_id == 2 && self.mode.has_speaker())
+                    || (unit_id == 5 && self.mode.has_mic())
+                {
                     let is_spk = unit_id == 2;
                     match (b_request, cs) {
                         // SET_CUR Mute (0x01)
@@ -574,10 +746,15 @@ pub(crate) struct VirtualAudioServer {
 }
 
 impl VirtualAudioServer {
-    pub fn bind(port: u16, bridge: Arc<SharedAudioBridge>) -> io::Result<Self> {
+    pub fn bind(
+        port: u16,
+        bridge: Arc<SharedAudioBridge>,
+        mode: VirtualAudioMode,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let actual_port = listener.local_addr()?.port();
         let shared = Arc::new(AudioServerShared {
+            mode,
             bridge,
             control: Mutex::new(UacControlState::default()),
             iso_out_pending: Mutex::new(VecDeque::with_capacity(32)),
@@ -619,31 +796,40 @@ impl Drop for VirtualAudioServer {
     }
 }
 
-/// Active Virtual DualSense Windows Audio Device (Speakers + Microphone) attached via `usbip-win2`.
+/// Active Virtual DualSense Windows Audio Device (Speakers and/or Microphone) attached via `usbip-win2`.
 pub struct VirtualAudioDevice {
+    mode: VirtualAudioMode,
     server: VirtualAudioServer,
     bridge: Arc<SharedAudioBridge>,
     vhci_port: Option<u32>,
 }
 
 impl VirtualAudioDevice {
-    pub fn spawn(bridge: Arc<SharedAudioBridge>) -> Result<Self, String> {
+    pub fn spawn(bridge: Arc<SharedAudioBridge>, mode: VirtualAudioMode) -> Result<Self, String> {
         if !is_usbip_win2_installed() {
             return Err("usbip-win2 is not installed".to_owned());
         }
-        let server = VirtualAudioServer::bind(0, Arc::clone(&bridge))
+        let server = VirtualAudioServer::bind(0, Arc::clone(&bridge), mode)
             .map_err(|e| format!("failed to bind virtual audio USB/IP server: {e}"))?;
         let vhci_port = attach_local(server.port(), "1-1")?;
         bridge.virtual_audio_attached.store(true, Ordering::Release);
         debug!(
             tcp_port = server.port(),
-            vhci_port, "Attached Virtual DualSense Audio device"
+            vhci_port,
+            ?mode,
+            "Attached Virtual DualSense Audio device"
         );
         Ok(Self {
+            mode,
             server,
             bridge,
             vhci_port: Some(vhci_port),
         })
+    }
+
+    #[inline]
+    pub fn mode(&self) -> VirtualAudioMode {
+        self.mode
     }
 }
 
@@ -696,7 +882,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<AudioServerShared>) {
     }
 }
 
-fn encode_usbip_audio_device_record(out: &mut Vec<u8>) {
+fn encode_usbip_audio_device_record(out: &mut Vec<u8>, mode: VirtualAudioMode) {
     let mut path = [0u8; 256];
     let p = b"/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1";
     path[..p.len()].copy_from_slice(p);
@@ -710,14 +896,14 @@ fn encode_usbip_audio_device_record(out: &mut Vec<u8>) {
     out.extend_from_slice(&1u32.to_be_bytes()); // devnum
     out.extend_from_slice(&USB_SPEED_FULL.to_be_bytes());
     out.extend_from_slice(&AUDIO_VID.to_be_bytes());
-    out.extend_from_slice(&AUDIO_PID.to_be_bytes());
+    out.extend_from_slice(&mode.pid().to_be_bytes());
     out.extend_from_slice(&0x0100u16.to_be_bytes()); // bcdDevice
     out.push(0x00); // bDeviceClass
     out.push(0x00); // bDeviceSubClass
     out.push(0x00); // bDeviceProtocol
     out.push(1); // bConfigurationValue
     out.push(1); // bNumConfigurations
-    out.push(3); // bNumInterfaces
+    out.push(mode.num_interfaces()); // bNumInterfaces
 }
 
 fn handle_client(mut stream: TcpStream, shared: Arc<AudioServerShared>) {
@@ -738,11 +924,15 @@ fn handle_client(mut stream: TcpStream, shared: Arc<AudioServerShared>) {
             resp.extend_from_slice(&OP_REP_DEVLIST.to_be_bytes());
             resp.extend_from_slice(&0u32.to_be_bytes());
             resp.extend_from_slice(&1u32.to_be_bytes());
-            encode_usbip_audio_device_record(&mut resp);
-            // 3 interfaces: AudioControl (0x01,0x01,0x00), AS OUT (0x01,0x02,0x00), AS IN (0x01,0x02,0x00)
+            encode_usbip_audio_device_record(&mut resp, shared.mode);
+            // AudioControl (0x01,0x01,0x00) + 1 AudioStreaming interface per active direction
             resp.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
-            resp.extend_from_slice(&[0x01, 0x02, 0x00, 0x00]);
-            resp.extend_from_slice(&[0x01, 0x02, 0x00, 0x00]);
+            if shared.mode.has_speaker() {
+                resp.extend_from_slice(&[0x01, 0x02, 0x00, 0x00]);
+            }
+            if shared.mode.has_mic() {
+                resp.extend_from_slice(&[0x01, 0x02, 0x00, 0x00]);
+            }
             let _ = stream.write_all(&resp);
             let _ = stream.flush();
         }
@@ -772,7 +962,7 @@ fn handle_client(mut stream: TcpStream, shared: Arc<AudioServerShared>) {
             resp.extend_from_slice(&USBIP_VERSION.to_be_bytes());
             resp.extend_from_slice(&OP_REP_IMPORT.to_be_bytes());
             resp.extend_from_slice(&0u32.to_be_bytes());
-            encode_usbip_audio_device_record(&mut resp);
+            encode_usbip_audio_device_record(&mut resp, shared.mode);
             if stream.write_all(&resp).is_err() || stream.flush().is_err() {
                 return;
             }
@@ -1150,31 +1340,67 @@ fn send_ret_unlink(shared: &AudioServerShared, seqnum: u32, status: i32) -> io::
 mod tests {
     use super::*;
 
-    #[test]
-    fn uac_descriptors_have_valid_structure_and_lengths() {
-        assert_eq!(AUDIO_DEVICE_DESCRIPTOR.len(), 18);
-        assert_eq!(AUDIO_CONFIG_DESCRIPTOR.len(), 193);
-        let total = u16::from_le_bytes([AUDIO_CONFIG_DESCRIPTOR[2], AUDIO_CONFIG_DESCRIPTOR[3]]);
-        assert_eq!(total, 193);
-        assert_eq!(AUDIO_CONFIG_DESCRIPTOR[4], 3); // 3 interfaces
-
-        // Walk descriptors sequentially to verify lengths sum cleanly to 193.
+    fn walk_config_descriptor(desc: &[u8]) -> usize {
+        let total = u16::from_le_bytes([desc[2], desc[3]]) as usize;
+        assert_eq!(total, desc.len());
         let mut off = 0usize;
         let mut count = 0usize;
-        while off < AUDIO_CONFIG_DESCRIPTOR.len() {
-            let len = AUDIO_CONFIG_DESCRIPTOR[off] as usize;
+        while off < desc.len() {
+            let len = desc[off] as usize;
             assert!(len >= 2);
             off += len;
             count += 1;
         }
-        assert_eq!(off, AUDIO_CONFIG_DESCRIPTOR.len());
-        assert_eq!(count, 21);
+        assert_eq!(off, desc.len());
+        count
+    }
+
+    #[test]
+    fn uac_descriptors_have_valid_structure_and_lengths() {
+        assert_eq!(AUDIO_DEVICE_DESCRIPTOR.len(), 18);
+        assert_eq!(AUDIO_CONFIG_DESCRIPTOR.len(), 193);
+        assert_eq!(AUDIO_CONFIG_DESCRIPTOR[4], 3); // 3 interfaces
+        assert_eq!(walk_config_descriptor(&AUDIO_CONFIG_DESCRIPTOR), 21);
+
+        assert_eq!(AUDIO_SPEAKER_CONFIG_DESCRIPTOR.len(), 110);
+        assert_eq!(AUDIO_SPEAKER_CONFIG_DESCRIPTOR[4], 2);
+        assert_eq!(walk_config_descriptor(&AUDIO_SPEAKER_CONFIG_DESCRIPTOR), 12);
+
+        assert_eq!(AUDIO_MIC_CONFIG_DESCRIPTOR.len(), 109);
+        assert_eq!(AUDIO_MIC_CONFIG_DESCRIPTOR[4], 2);
+        assert_eq!(walk_config_descriptor(&AUDIO_MIC_CONFIG_DESCRIPTOR), 12);
+    }
+
+    #[test]
+    fn single_mode_set_interface_maps_correct_endpoint() {
+        let spk_bridge = Arc::new(SharedAudioBridge::new());
+        let spk_srv =
+            VirtualAudioServer::bind(0, Arc::clone(&spk_bridge), VirtualAudioMode::SpeakerOnly)
+                .unwrap();
+        let (st, _, _) = spk_srv
+            .shared
+            .handle_control_transfer([0x01, 0x0B, 1, 0, 1, 0, 0, 0], 0, &[]);
+        assert_eq!(st, 0);
+        assert!(spk_bridge.speaker_endpoint_open.load(Ordering::Acquire));
+        assert!(!spk_bridge.mic_endpoint_open.load(Ordering::Acquire));
+
+        let mic_bridge = Arc::new(SharedAudioBridge::new());
+        let mic_srv =
+            VirtualAudioServer::bind(0, Arc::clone(&mic_bridge), VirtualAudioMode::MicOnly)
+                .unwrap();
+        let (st, _, _) = mic_srv
+            .shared
+            .handle_control_transfer([0x01, 0x0B, 1, 0, 1, 0, 0, 0], 0, &[]);
+        assert_eq!(st, 0);
+        assert!(!mic_bridge.speaker_endpoint_open.load(Ordering::Acquire));
+        assert!(mic_bridge.mic_endpoint_open.load(Ordering::Acquire));
     }
 
     #[test]
     fn usbip_audio_loopback_control_and_iso_round_trip() {
         let bridge = Arc::new(SharedAudioBridge::new());
-        let srv = VirtualAudioServer::bind(0, Arc::clone(&bridge)).unwrap();
+        let srv =
+            VirtualAudioServer::bind(0, Arc::clone(&bridge), VirtualAudioMode::Both).unwrap();
         let addr = format!("127.0.0.1:{}", srv.port());
 
         // 1. OP_REQ_DEVLIST

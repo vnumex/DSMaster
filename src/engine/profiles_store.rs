@@ -95,6 +95,18 @@ pub fn open_config_dir() -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_legacy_audio(cfg: &mut AppConfig) {
+    for p in &mut cfg.profiles {
+        if p.settings.virtual_audio_device
+            && !p.settings.virtual_speaker_device
+            && !p.settings.virtual_mic_device
+        {
+            p.settings.virtual_speaker_device = true;
+            p.settings.virtual_mic_device = true;
+        }
+    }
+}
+
 pub fn load_config() -> AppConfig {
     let Some(path) = config_path() else {
         return AppConfig::default();
@@ -103,6 +115,7 @@ pub fn load_config() -> AppConfig {
         return AppConfig::default();
     };
     let mut cfg: AppConfig = toml::from_str(&raw).unwrap_or_default();
+    migrate_legacy_audio(&mut cfg);
     if cfg.profiles.is_empty() {
         cfg.profiles.push(NamedProfile {
             name: "Default".to_owned(),
@@ -173,5 +186,32 @@ auto_switch_profiles = true
         let prof = ControllerProfile::default();
         assert!(!prof.override_triggers);
         assert!(!prof.override_lightbar);
+    }
+
+    #[test]
+    fn legacy_virtual_audio_migrates_to_speaker_and_mic() {
+        let mut cfg = AppConfig {
+            profiles: vec![
+                NamedProfile {
+                    name: "LegacyOn".to_owned(),
+                    linked_exe: None,
+                    settings: ControllerProfile {
+                        virtual_audio_device: true,
+                        ..Default::default()
+                    },
+                },
+                NamedProfile {
+                    name: "LegacyOff".to_owned(),
+                    linked_exe: None,
+                    settings: ControllerProfile::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        migrate_legacy_audio(&mut cfg);
+        assert!(cfg.profiles[0].settings.virtual_speaker_device);
+        assert!(cfg.profiles[0].settings.virtual_mic_device);
+        assert!(!cfg.profiles[1].settings.virtual_speaker_device);
+        assert!(!cfg.profiles[1].settings.virtual_mic_device);
     }
 }
