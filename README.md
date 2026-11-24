@@ -5,6 +5,8 @@
 
 Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSense Edge controllers, written in Rust with a GPU-accelerated [GPUI](https://gpui.rs) interface.
 
+![DSMaster Overview](assets/screenshot.jpg)
+
 ## Current Features
 
 - **USB and Bluetooth DualSense / DualSense Edge support:** Native Win32 overlapped HID I/O with event-driven hot-plug detection (`CM_Register_Notification`) and CRC-32 verification on Bluetooth `0x31` reports.
