@@ -1279,21 +1279,6 @@ impl DsMasterView {
             device_card = device_card.child(switcher);
         }
 
-        let active_meta = || {
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(color(ACCENT))
-                .child("On")
-        };
-
-        let trigger_meta = profile.override_triggers.then(active_meta);
-        let audio_meta = (profile.virtual_audio_device || profile.bt_haptics_enabled)
-            .then(active_meta);
-        let light_meta = profile.override_lightbar.then(active_meta);
-        let gyro_meta =
-            (profile.gyro_mode != GyroAimMode::Off || profile.touchpad_mouse).then(active_meta);
-
         // Icons follow text role color (bright primary when active, muted when resting)
         let nav_icon_col = |p: ActivePage| {
             if self.page == p {
@@ -1381,7 +1366,6 @@ impl DsMasterView {
                                             ),
                                             "Overview",
                                             self.page == ActivePage::QuickSettings,
-                                            None,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::QuickSettings;
@@ -1394,7 +1378,6 @@ impl DsMasterView {
                                             stick_icon(16.0, nav_icon_col(ActivePage::Sticks)),
                                             "Sticks & curves",
                                             self.page == ActivePage::Sticks,
-                                            None,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::Sticks;
@@ -1407,7 +1390,6 @@ impl DsMasterView {
                                             trigger_icon(16.0, nav_icon_col(ActivePage::Triggers)),
                                             "Triggers & haptics",
                                             self.page == ActivePage::Triggers,
-                                            trigger_meta,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::Triggers;
@@ -1420,7 +1402,6 @@ impl DsMasterView {
                                             speaker_icon(16.0, nav_icon_col(ActivePage::Audio)),
                                             "Audio & mic",
                                             self.page == ActivePage::Audio,
-                                            audio_meta,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::Audio;
@@ -1433,7 +1414,6 @@ impl DsMasterView {
                                             sun_icon(16.0, nav_icon_col(ActivePage::Lighting)),
                                             "Lighting & LEDs",
                                             self.page == ActivePage::Lighting,
-                                            light_meta,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::Lighting;
@@ -1446,7 +1426,6 @@ impl DsMasterView {
                                             gyro_icon(16.0, nav_icon_col(ActivePage::MotionRemap)),
                                             "Motion & remap",
                                             self.page == ActivePage::MotionRemap,
-                                            gyro_meta,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::MotionRemap;
@@ -1459,7 +1438,6 @@ impl DsMasterView {
                                             info_icon(16.0, nav_icon_col(ActivePage::DeviceInfo)),
                                             "Device info",
                                             self.page == ActivePage::DeviceInfo,
-                                            None,
                                         )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.page = ActivePage::DeviceInfo;
@@ -3391,7 +3369,7 @@ impl DsMasterView {
             cx,
         );
 
-        let mut route_pills = div().flex().w_full().gap_2();
+        let mut route_pills = div().flex().flex_wrap().w_full().gap_2();
         for route in BtAudioRoute::ALL {
             let active = profile.bt_audio_route == route;
             route_pills = route_pills.child(

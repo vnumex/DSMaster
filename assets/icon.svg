@@ -16,17 +16,17 @@
   <g transform="translate(256,256) rotate(-40) scale(0.98) translate(-256,-256)">
     <!-- Solid faceted cobalt body with transparent negative-space cutouts -->
     <g mask="url(#ds-cutouts)" clip-path="url(#ds-body-clip)">
-      <path d="M 256,126 C 302,126 336,118 370,118 C 410,118 438,136 454,174 C 470,214 482,274 480,328 C 478,370 462,398 438,404 C 414,410 392,394 374,366 C 356,338 338,314 306,310 C 284,308 270,310 256,310 C 242,310 228,308 206,310 C 174,314 156,338 138,366 C 120,394 98,410 74,404 C 50,398 34,370 32,328 C 30,274 42,214 58,174 C 74,136 102,118 142,118 C 176,118 210,126 256,126 Z" fill="#3B82F6"/>
+      <path d="M 256,126 C 302,126 336,118 370,118 C 410,118 438,136 454,174 C 470,214 482,274 480,328 C 478,370 462,398 438,404 C 414,410 392,394 374,366 C 356,338 338,314 306,310 C 284,308 270,310 256,310 C 242,310 228,308 206,310 C 174,314 156,338 138,366 C 120,394 98,410 74,404 C 50,398 34,370 32,328 C 30,274 42,214 58,174 C 74,136 102,118 142,118 C 176,118 210,126 256,126 Z" fill="#FFFFFF"/>
       <!-- Lower faceted bevel plane for crisp depth without outline or shadow -->
-      <path d="M 140,225 L 372,225 L 490,420 L 22,420 Z" fill="#2563EB"/>
-      <path d="M 185,265 L 327,265 L 350,340 L 162,340 Z" fill="#1D4ED8"/>
+      <path d="M 140,225 L 372,225 L 490,420 L 22,420 Z" fill="#E5E7EB"/>
+      <path d="M 185,265 L 327,265 L 350,340 L 162,340 Z" fill="#CBD5E1"/>
     </g>
 
     <!-- Razor-sharp solid V-lightbar inside touchpad cutout -->
     <path d="M 193,128 L 208,214 Q 210,220 217,220 L 295,220 Q 302,220 304,214 L 319,128"
-          fill="none" stroke="#60A5FA" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+          fill="none" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
     <!-- Minimal solid stick center pips -->
-    <circle cx="195" cy="274" r="10" fill="#1D4ED8"/>
-    <circle cx="317" cy="274" r="10" fill="#1D4ED8"/>
+    <circle cx="195" cy="274" r="10" fill="#E2E8F0"/>
+    <circle cx="317" cy="274" r="10" fill="#E2E8F0"/>
   </g>
 </svg>

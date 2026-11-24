@@ -245,7 +245,7 @@ fn session_loop(
     let mut dirty_right_trigger = false;
     let mut release_triggers = false;
     let mut dirty_bt_audio = false;
-    let mut last_bt_audio_hw: Option<(bool, u8, u8, BtAudioRoute, bool)> = None;
+    let mut last_bt_audio_hw: Option<(bool, u8, u8, BtAudioRoute, bool, bool)> = None;
 
     let (bt_audio_bridge, mut bt_audio_worker) = if info.transport == Transport::Bluetooth {
         let bridge = Arc::new(SharedAudioBridge::new());
@@ -500,12 +500,16 @@ fn session_loop(
                 };
                 let bt_spk_vol_byte = scale_speaker_volume(bt_vol_norm);
                 let bt_hp_vol_byte = scale_headphone_volume(bt_vol_norm);
+                let virtual_speaker_open = bt_audio_bridge
+                    .as_ref()
+                    .is_some_and(|b| b.speaker_endpoint_open.load(Ordering::Acquire));
                 let bt_hw_key = (
                     bt_any_audio,
                     bt_spk_vol_byte,
                     bt_hp_vol_byte,
                     prof.bt_audio_route,
                     bt_hap_active,
+                    virtual_speaker_open,
                 );
                 if bt_any_audio && last_bt_audio_hw != Some(bt_hw_key) {
                     last_bt_audio_hw = Some(bt_hw_key);
@@ -817,12 +821,16 @@ fn session_loop(
                     let bt_spk_vol_byte = scale_speaker_volume(bt_vol_norm);
                     let bt_hp_vol_byte = scale_headphone_volume(bt_vol_norm);
                     let bt_hap_active = prof.bt_haptics_enabled || bt_hap_test_active;
+                    let virtual_speaker_open = bt_audio_bridge
+                        .as_ref()
+                        .is_some_and(|b| b.speaker_endpoint_open.load(Ordering::Acquire));
                     let bt_hw_key = (
                         true,
                         bt_spk_vol_byte,
                         bt_hp_vol_byte,
                         prof.bt_audio_route,
                         bt_hap_active,
+                        virtual_speaker_open,
                     );
                     if last_bt_audio_hw != Some(bt_hw_key) {
                         last_bt_audio_hw = Some(bt_hw_key);

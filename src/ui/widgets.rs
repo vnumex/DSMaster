@@ -371,12 +371,11 @@ pub fn drawer_nav_item(
     icon: Div,
     label: impl Into<SharedString>,
     active: bool,
-    meta: Option<Div>,
 ) -> Stateful<Div> {
     let bg = if active { SURFACE_ALT } else { DRAWER_BG };
     let border = if active { BORDER_STRONG } else { DRAWER_BG };
     let text = if active { TEXT } else { TEXT_SECONDARY };
-    let mut row = div()
+    div()
         .id(id.into())
         .w_full()
         .h(px(36.0))
@@ -387,7 +386,6 @@ pub fn drawer_nav_item(
         .border_color(color(border))
         .flex()
         .items_center()
-        .justify_between()
         .gap_2()
         .cursor_pointer()
         .hover(move |s| {
@@ -418,12 +416,7 @@ pub fn drawer_nav_item(
                         .whitespace_nowrap()
                         .child(label.into()),
                 ),
-        );
-
-    if let Some(m) = meta {
-        row = row.child(m);
-    }
-    row
+        )
 }
 
 /// Inset status banner with crisp 16px vector icon (zero dots, zero glowing discs)

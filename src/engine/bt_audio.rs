@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use rusty_opus::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, Bandwidth, OpusDecoder, OpusEncoder};
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, S_FALSE, S_OK};
 use windows::Win32::Media::Audio::{
@@ -569,10 +569,12 @@ impl Drop for BtAudioWorkerHandle {
 }
 
 fn create_ds5_opus_encoder() -> Result<OpusEncoder, String> {
-    let mut enc = OpusEncoder::new(TARGET_RATE as i32, 2, Application::Audio)
+    let mut enc = OpusEncoder::new(TARGET_RATE as i32, 2, Application::RestrictedLowDelay)
         .map_err(|e| format!("OpusEncoder::new: {e:?}"))?;
-    enc.bitrate_bps = 156_000;
+    enc.bitrate_bps = (DS_BT_AUDIO_OPUS_BYTES as i32) * 8 * 100;
     enc.use_cbr = true;
+    enc.use_dtx = false;
+    enc.force_bandwidth = Some(Bandwidth::Fullband);
     enc.complexity = 5;
     Ok(enc)
 }
@@ -800,9 +802,9 @@ fn bt_audio_worker_loop(
 
         // Speaker path: virtual USB audio device (when enabled) + test chime
         let spk_vol = prof.bt_speaker_volume.clamp(0.0, 1.0);
-        if want_virt_spk {
+        if want_virt_spk && spk_vol > 0.001 {
             for i in 0..TICK_FRAMES * 2 {
-                spk_512[i] = (virt_spk_512[i] * spk_vol).clamp(-1.0, 1.0);
+                spk_512[i] = virt_spk_512[i].clamp(-1.0, 1.0);
             }
         } else {
             spk_512.fill(0.0);
@@ -983,21 +985,23 @@ fn bt_audio_worker_loop(
             }
         }
 
-        // Absolute schedule pacing; never burst catch-up frames.
+        // Absolute schedule pacing; never burst catch-up frames, and never insert
+        // a full extra tick sleep on a slight write overrun.
         let now_after = Instant::now();
-        if next_tick <= now_after {
+        if now_after < next_tick {
+            let wait_us = next_tick
+                .duration_since(now_after)
+                .as_micros()
+                .max(250) as u64;
+            if let Some(t) = timer.as_ref() {
+                t.wait_us(wait_us);
+            } else {
+                thread::sleep(Duration::from_micros(wait_us));
+            }
+            next_tick += tick_dur;
+        } else {
             next_tick = now_after + tick_dur;
         }
-        let wait_us = next_tick
-            .saturating_duration_since(now_after)
-            .as_micros()
-            .max(500) as u64;
-        if let Some(t) = timer.as_ref() {
-            t.wait_us(wait_us);
-        } else {
-            thread::sleep(Duration::from_micros(wait_us));
-        }
-        next_tick += tick_dur;
     }
 
     telemetry.speaker_streaming.store(false, Ordering::Release);
@@ -1054,6 +1058,15 @@ mod tests {
     #[test]
     fn rusty_opus_cbr_48k_10ms_fits_200_byte_slot() {
         let mut enc = create_ds5_opus_encoder().unwrap();
+        let silence = [0.0_f32; OPUS_FRAME_SAMPLES * 2];
+        let mut out = [0u8; 256];
+        let silence_len = enc.encode(&silence, OPUS_FRAME_SAMPLES, &mut out).unwrap();
+        assert_eq!(
+            silence_len, DS_BT_AUDIO_OPUS_BYTES,
+            "Expected exact 200-byte CBR silence frame, got {silence_len}"
+        );
+        assert_eq!(out[0], 0xF4, "Expected CELT-only Fullband 10 ms stereo TOC");
+
         let mut pcm = [0.0_f32; OPUS_FRAME_SAMPLES * 2];
         for i in 0..OPUS_FRAME_SAMPLES {
             let t = i as f32 / 48_000.0;
@@ -1061,12 +1074,20 @@ mod tests {
             pcm[i * 2] = s;
             pcm[i * 2 + 1] = s;
         }
-        let mut out = [0u8; 256];
         let len = enc.encode(&pcm, OPUS_FRAME_SAMPLES, &mut out).unwrap();
-        assert!(
-            len > 0 && len <= DS_BT_AUDIO_OPUS_BYTES,
-            "Expected 1..=200 byte Opus frame, got {len}"
+        assert_eq!(
+            len, DS_BT_AUDIO_OPUS_BYTES,
+            "Expected exact 200-byte CBR frame, got {len}"
         );
+        assert_eq!(out[0], 0xF4, "Expected CELT-only Fullband 10 ms stereo TOC");
+
+        let mut dec = OpusDecoder::new(TARGET_RATE as i32, 2).unwrap();
+        let mut decoded_pcm = [0.0_f32; OPUS_FRAME_SAMPLES * 2];
+        let decoded = dec
+            .decode(&out[..len], OPUS_FRAME_SAMPLES, &mut decoded_pcm)
+            .unwrap();
+        assert_eq!(decoded, OPUS_FRAME_SAMPLES);
+        assert!(peak_u8(&decoded_pcm) > 80);
     }
 
     #[test]

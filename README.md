@@ -1,4 +1,7 @@
-# DSMaster
+<h1>
+  <img src="assets/icon-blue.svg" alt="DSMaster" width="38" align="absmiddle" />
+  &nbsp;DSMaster
+</h1>
 
 Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSense Edge controllers, written in Rust with a GPU-accelerated [GPUI](https://gpui.rs) interface.
 
@@ -10,7 +13,7 @@ Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSen
 - **HidHide physical controller cloaking:** Direct `HidHide` IOCTL integration with 3-layer virtual-device self-exclusion to hide only the physical DualSense and prevent double input.
 - **Stick, trigger, and button tuning:** Radial/Axial/Passthrough deadzones, outer deadzone (saturation), anti-deadzone, axis inversion, L/R stick swap, response curves (`Linear`, `Quadratic`, `Cubic`, `Aggressive`), independent L2/R2 deadzones & hair-trigger scaling, full customizable button-to-button remapping (with swap & disable), and Turbo rapid-fire.
 - **Adaptive triggers, lighting, and rumble:** Independent L2 and R2 presets (`Off`, `Soft`, `Rigid`, `Weapon`, `Bow`, `Slope`, `Pulse`, `Machine`, `Galloping`, `Custom`), custom trigger parameters, rumble intensity scaling with live Left/Right/Both motor testing, lightbar RGB picker & animations (`Static`, `Breathing`, `Rainbow`, `Battery`, `Trigger`), lightbar & player LED brightness, mic mute LED override, low-battery flash alert, and idle lightbar dim timeout.
-- **Bluetooth speaker, microphone & HD voice-coil haptics:** Dedicated **Audio & mic** section with an optional Virtual Windows Audio Device (`Speakers` + `Microphone (DualSense Wireless Audio)` via `usbip-win2` UAC 1.0), WASAPI loopback PC audio mirroring to the DualSense speaker/3.5 mm jack over Bluetooth (`0x35` 48 kHz 10 ms CBR Opus), full-duplex Bluetooth microphone capture (`0x31` mono Opus), low-passed 3 kHz stereo HD haptics (`0x32` / combined `0x35`), route selection (`Speaker`, `Headphones`, `Both`), independent volume/gain, and built-in test chime & HD haptics generators.
+- **Bluetooth speaker, microphone & HD voice-coil haptics:** Dedicated **Audio & mic** section with an optional Virtual Windows Audio Device (`Speakers` + `Microphone (DualSense Wireless Audio)` via `usbip-win2` UAC 1.0), WASAPI loopback PC audio mirroring to the DualSense speaker/3.5 mm jack over Bluetooth (`0x35` 48 kHz 10 ms CBR Opus), full-duplex Bluetooth microphone capture (`0x31` mono Opus), low-passed 3 kHz stereo HD haptics (`0x32` / combined `0x35`), route selection (`Built-in speaker`, `Headphone jack`, `Both`), independent volume/gain, and built-in test chime & HD haptics generators.
 - **Touchpad, gyro & diagnostics:** Touchpad-to-mouse with 2-finger vertical scroll, tap-to-click, and split L/R click zones; calibrated gyro-to-mouse or gyro-to-right-stick (`Off`, `Hold L2`, `Hold L1`, `Hold R2`, `Hold R1`, `Touchpad`, `Always On`) with deadzone, yaw/roll axes, inversion, and live IMU telemetry; and **Device info** hardware/firmware diagnostics (`0x09`/`0x20` reports).
 - **Per-application profiles:** Automatic foreground-window profile switching via `SetWinEventHook`, profile duplicate/reset, clipboard TOML export/import, and TOML persistence at `%APPDATA%\DSMaster\profiles.toml`.
 - **Background operation and settings:** Native Windows system tray with quick mode/cloak menu, close-to-tray, start minimized, launch at Windows startup, and single-instance wake-up.

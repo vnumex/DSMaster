@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::Mutex;
 use tracing::{debug, trace, warn};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimerEx,
+    TIMER_ALL_ACCESS, WaitForSingleObject,
+};
+
 
 use super::dualsense::driver::{attach_local, detach_port, is_usbip_win2_installed};
 use crate::protocol::constants::DS_BT_MIC_OPUS_BYTES;
@@ -51,8 +57,9 @@ const AUDIO_PRODUCT: &str = "DualSense Wireless Audio";
 const AUDIO_SERIAL: &str = "DSMASTER-VAUDIO-01";
 
 const RING_CAP_FRAMES: usize = 9600;
-const RING_LAG_LIMIT: usize = 2400;
-const SPEAKER_TRIM_TARGET: usize = 1440;
+const RING_LAG_LIMIT: usize = 4800;
+const SPEAKER_TRIM_TARGET: usize = 1920;
+const SPEAKER_PREBUFFER_FRAMES: usize = 960;
 const MIC_TRIM_TARGET: usize = 960;
 
 /// Thread-safe audio bridge shared between the virtual USB/IP audio device and the Bluetooth worker.
@@ -64,6 +71,7 @@ pub struct SharedAudioBridge {
     pub speaker_endpoint_open: AtomicBool,
     pub mic_endpoint_open: AtomicBool,
     pub virtual_audio_attached: AtomicBool,
+    speaker_primed: AtomicBool,
 }
 
 impl SharedAudioBridge {
@@ -77,7 +85,13 @@ impl SharedAudioBridge {
             speaker_endpoint_open: AtomicBool::new(false),
             mic_endpoint_open: AtomicBool::new(false),
             virtual_audio_attached: AtomicBool::new(false),
+            speaker_primed: AtomicBool::new(false),
         }
+    }
+
+    pub fn clear_speaker(&self) {
+        self.speaker_ring.lock().clear();
+        self.speaker_primed.store(false, Ordering::Release);
     }
 
     pub fn push_speaker_i16_stereo(&self, bytes: &[u8], gain: f32, muted: bool) {
@@ -99,14 +113,27 @@ impl SharedAudioBridge {
 
     pub fn pull_speaker_512(&self, out: &mut [f32; 512 * 2]) -> bool {
         let mut ring = self.speaker_ring.lock();
-        if ring.len() < 512 {
+        if !self.speaker_primed.load(Ordering::Acquire) {
+            if ring.len() < SPEAKER_PREBUFFER_FRAMES {
+                out.fill(0.0);
+                return false;
+            }
+            self.speaker_primed.store(true, Ordering::Release);
+        }
+        if ring.is_empty() {
+            self.speaker_primed.store(false, Ordering::Release);
             out.fill(0.0);
             return false;
         }
-        for i in 0..512 {
+        let avail = ring.len().min(512);
+        for i in 0..avail {
             let (l, r) = ring.pop_front().unwrap_or((0.0, 0.0));
             out[i * 2] = l;
             out[i * 2 + 1] = r;
+        }
+        if avail < 512 {
+            out[avail * 2..].fill(0.0);
+            self.speaker_primed.store(false, Ordering::Release);
         }
         true
     }
@@ -333,6 +360,7 @@ impl AudioServerShared {
         self.bridge
             .speaker_endpoint_open
             .store(false, Ordering::Release);
+        self.bridge.clear_speaker();
         self.bridge
             .mic_endpoint_open
             .store(false, Ordering::Release);
@@ -416,6 +444,9 @@ impl AudioServerShared {
                             self.bridge
                                 .speaker_endpoint_open
                                 .store(alt == 1, Ordering::Release);
+                            if alt == 0 {
+                                self.bridge.clear_speaker();
+                            }
                         } else if iface == 2 {
                             self.bridge
                                 .mic_endpoint_open
@@ -918,7 +949,44 @@ fn run_urb_loop(stream: &mut TcpStream, shared: &AudioServerShared) {
     }
 }
 
+struct HighResTimer(HANDLE);
+
+impl HighResTimer {
+    fn new() -> Option<Self> {
+        let h = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                None,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+        }
+        .ok()?;
+        Some(Self(h))
+    }
+
+    fn wait_us(&self, us: u64) {
+        let due_100ns = -((us as i64) * 10);
+        unsafe {
+            if SetWaitableTimerEx(self.0, &due_100ns, 0, None, None, None, 0).is_ok() {
+                let _ = WaitForSingleObject(self.0, 100);
+            } else {
+                thread::sleep(Duration::from_micros(us));
+            }
+        }
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 fn iso_pacer_loop(shared: Arc<AudioServerShared>, stop: Arc<AtomicBool>) {
+    let timer = HighResTimer::new();
     let mut pcm_buf: Vec<u8> = Vec::with_capacity(4096);
     while !stop.load(Ordering::Acquire) && !shared.shutdown.load(Ordering::Acquire) {
         let now = Instant::now();
@@ -995,7 +1063,30 @@ fn iso_pacer_loop(shared: Arc<AudioServerShared>, stop: Arc<AtomicBool>) {
             }
         }
 
-        thread::sleep(Duration::from_millis(1));
+        let earliest = {
+            let out_due = shared.iso_out_pending.lock().front().map(|u| u.due);
+            let in_due = shared.iso_in_pending.lock().front().map(|u| u.due);
+            match (out_due, in_due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        };
+        let now_after = Instant::now();
+        if earliest.is_some_and(|d| d <= now_after) {
+            continue;
+        }
+        let wait_us = match earliest {
+            Some(d) => d
+                .saturating_duration_since(now_after)
+                .as_micros()
+                .clamp(250, 1_000) as u64,
+            None => 1_000,
+        };
+        if let Some(t) = timer.as_ref() {
+            t.wait_us(wait_us);
+        } else {
+            thread::sleep(Duration::from_micros(wait_us));
+        }
     }
 }
 
@@ -1182,5 +1273,37 @@ mod tests {
         let desc = IsoPacketDesc::from_be_bytes(&ret_in[48 + 96..48 + 96 + 16]);
         assert_eq!(desc.actual_length, 96);
         assert_eq!(desc.status, 0);
+    }
+
+    #[test]
+    fn speaker_ring_prebuffers_and_drains_partial_tail() {
+        let bridge = SharedAudioBridge::new();
+        let mut out = [0.0_f32; 512 * 2];
+
+        let mut chunk_480 = Vec::with_capacity(480 * 4);
+        for _ in 0..480 {
+            chunk_480.extend_from_slice(&16384_i16.to_le_bytes());
+            chunk_480.extend_from_slice(&(-16384_i16).to_le_bytes());
+        }
+
+        // First 480 frames (< 960 prebuffer) holds silence and preserves queued frames.
+        bridge.push_speaker_i16_stereo(&chunk_480, 1.0, false);
+        assert!(!bridge.pull_speaker_512(&mut out));
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(bridge.speaker_ring.lock().len(), 480);
+
+        // Second 480 frames reaches 960 -> primes and pulls 512 frames.
+        bridge.push_speaker_i16_stereo(&chunk_480, 1.0, false);
+        assert!(bridge.pull_speaker_512(&mut out));
+        assert!((out[0] - 0.5).abs() < 1e-4);
+        assert!((out[1] + 0.5).abs() < 1e-4);
+        assert_eq!(bridge.speaker_ring.lock().len(), 448);
+
+        // Remaining 448 frames drain cleanly with zero-padded tail and reset primed state.
+        assert!(bridge.pull_speaker_512(&mut out));
+        assert!((out[447 * 2] - 0.5).abs() < 1e-4);
+        assert!(out[448 * 2..].iter().all(|&s| s == 0.0));
+        assert_eq!(bridge.speaker_ring.lock().len(), 0);
+        assert!(!bridge.speaker_primed.load(Ordering::Acquire));
     }
 }

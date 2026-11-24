@@ -50,8 +50,8 @@ impl BtAudioRoute {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Speaker => "Speaker",
-            Self::Headphones => "Headphones",
+            Self::Speaker => "Built-in speaker",
+            Self::Headphones => "Headphone jack",
             Self::Both => "Both",
         }
     }
