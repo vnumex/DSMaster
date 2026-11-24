@@ -28,8 +28,7 @@ use crate::protocol::{
     DS_GYRO_RES_PER_DEG_S, DualSenseButtons, ImuCalibration, MicMuteLed, OutputState,
     ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX,
     constants::{DS_ACC_RES_PER_G, DS_BT_MIC_VOLUME_MAX, DS_INPUT_REPORT_BT},
-    encode_output_report, extract_bt_mic_opus, parse_input_report, scale_headphone_volume,
-    scale_speaker_volume,
+    encode_output_report, extract_bt_mic_opus, parse_input_report,
 };
 
 struct MmcssGuard(HANDLE);
@@ -493,13 +492,9 @@ fn session_loop(
                         virtual_audio_attempted = false;
                     }
                 }
-                let bt_vol_norm = if prof.virtual_audio_device {
-                    prof.bt_speaker_volume
-                } else {
-                    0.85
-                };
-                let bt_spk_vol_byte = scale_speaker_volume(bt_vol_norm);
-                let bt_hp_vol_byte = scale_headphone_volume(bt_vol_norm);
+                let bt_vol_norm = prof.bt_speaker_volume;
+                let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
+                let bt_hp_vol_byte = prof.bt_audio_route.effective_headphone_volume(bt_vol_norm);
                 let virtual_speaker_open = bt_audio_bridge
                     .as_ref()
                     .is_some_and(|b| b.speaker_endpoint_open.load(Ordering::Acquire));
@@ -813,13 +808,9 @@ fn session_loop(
                     }
                 }
                 if bt_any_audio {
-                    let bt_vol_norm = if prof.virtual_audio_device {
-                        prof.bt_speaker_volume
-                    } else {
-                        0.85
-                    };
-                    let bt_spk_vol_byte = scale_speaker_volume(bt_vol_norm);
-                    let bt_hp_vol_byte = scale_headphone_volume(bt_vol_norm);
+                    let bt_vol_norm = prof.bt_speaker_volume;
+                    let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
+                    let bt_hp_vol_byte = prof.bt_audio_route.effective_headphone_volume(bt_vol_norm);
                     let bt_hap_active = prof.bt_haptics_enabled || bt_hap_test_active;
                     let virtual_speaker_open = bt_audio_bridge
                         .as_ref()

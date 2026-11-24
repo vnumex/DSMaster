@@ -77,6 +77,22 @@ impl BtAudioRoute {
     pub fn needs_mono_fold(self) -> bool {
         matches!(self, Self::Speaker | Self::Both)
     }
+
+    #[inline]
+    pub fn effective_speaker_volume(self, vol: f32) -> u8 {
+        match self {
+            Self::Headphones => 0x00,
+            Self::Speaker | Self::Both => scale_speaker_volume(vol),
+        }
+    }
+
+    #[inline]
+    pub fn effective_headphone_volume(self, vol: f32) -> u8 {
+        match self {
+            Self::Speaker => 0x00,
+            Self::Headphones | Self::Both => scale_headphone_volume(vol),
+        }
+    }
 }
 
 /// Maps normalized `[0.0, 1.0]` speaker volume to Sony's hardware speaker gain window (`0x3D..=0x64`, or `0x00` when muted).
@@ -590,5 +606,20 @@ mod tests {
         assert_eq!(bt[9], 0x40); // mic_volume
         assert_eq!(bt[10], 0x30); // audio_control (speaker only)
         assert_eq!(bt[12], 0x00); // power_save / mute control unmuted
+    }
+
+    #[test]
+    fn route_effective_volumes_mute_inactive_output() {
+        assert_eq!(BtAudioRoute::Speaker.audio_control_byte(), 0x30);
+        assert_eq!(BtAudioRoute::Speaker.effective_speaker_volume(1.0), 0x64);
+        assert_eq!(BtAudioRoute::Speaker.effective_headphone_volume(1.0), 0x00);
+
+        assert_eq!(BtAudioRoute::Headphones.audio_control_byte(), 0x00);
+        assert_eq!(BtAudioRoute::Headphones.effective_speaker_volume(1.0), 0x00);
+        assert_eq!(BtAudioRoute::Headphones.effective_headphone_volume(1.0), 0x7F);
+
+        assert_eq!(BtAudioRoute::Both.audio_control_byte(), 0x20);
+        assert_eq!(BtAudioRoute::Both.effective_speaker_volume(1.0), 0x64);
+        assert_eq!(BtAudioRoute::Both.effective_headphone_volume(1.0), 0x7F);
     }
 }

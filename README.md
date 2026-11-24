@@ -1,5 +1,5 @@
 <h1>
-  <img src="assets/icon-blue.svg" alt="DSMaster" width="38" align="absmiddle" />
+  <img src="assets/icon-blue.svg" alt="DSMaster" width="64" align="absmiddle" />
   &nbsp;DSMaster
 </h1>
 

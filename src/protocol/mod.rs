@@ -38,7 +38,6 @@ pub use input::{BatteryStatus, DPad, DualSenseButtons, RawInputState, parse_inpu
 pub use input::encode_usb_input_report;
 pub use output::{
     BtAudioRoute, LedBrightness, MicMuteLed, OutputState, encode_output_report,
-    scale_headphone_volume, scale_speaker_volume,
 };
 #[allow(unused_imports)]
 pub use output::{ParsedOutputReport, parse_usb_output_report};
