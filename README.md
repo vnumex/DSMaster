@@ -1,9 +1,11 @@
-<h1>
-  <img src="assets/icon-blue.svg" alt="DSMaster" width="64" align="absmiddle" />
+<h1 align="center">
+  <img src="assets/icon-blue.svg" alt="DSMaster" width="96" align="absmiddle" />
   &nbsp;DSMaster
 </h1>
 
-Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSense Edge controllers, written in Rust with a GPU-accelerated [GPUI](https://gpui.rs) interface.
+<p align="center">
+  Low-latency Windows desktop utility for Sony PlayStation 5 DualSense and DualSense Edge controllers, written in Rust with a GPU-accelerated <a href="https://gpui.rs">GPUI</a> interface.
+</p>
 
 ![DSMaster Overview](assets/screenshot.jpg)
 
