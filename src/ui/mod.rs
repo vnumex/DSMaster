@@ -57,6 +57,20 @@ use crate::protocol::{BatteryStatus, BtAudioRoute, LedBrightness, Transport};
 use crate::startup::{is_run_at_startup_enabled, set_run_at_startup};
 use crate::tray::{SystemTray, TrayAction, TrayState};
 
+fn override_toggle_with_label(enabled: bool, switch: impl IntoElement) -> Div {
+    let mut row = div().flex().items_center().gap_2();
+    if !enabled {
+        row = row.child(
+            div()
+                .text_xs()
+                .text_color(color(TEXT_MUTED))
+                .whitespace_nowrap()
+                .child("Passthrough"),
+        );
+    }
+    row.child(switch)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivePage {
     QuickSettings,
@@ -199,19 +213,6 @@ const HAIR_TRIGGER_STEPS: [(&str, u8); 4] =
 
 const SENSITIVITY_STEPS: [(&str, f32); 4] =
     [("0.5x", 0.5), ("1.0x", 1.0), ("1.5x", 1.5), ("2.0x", 2.0)];
-
-fn fmt_thousands(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(b as char);
-    }
-    out
-}
 
 fn trigger_preset_desc(preset: TriggerPreset) -> &'static str {
     match preset {
@@ -1461,7 +1462,7 @@ impl DsMasterView {
                         div()
                             .text_xs()
                             .text_color(color(TEXT_MUTED))
-                            .child("DSMaster v0.1.0"),
+                            .child(concat!("DSMaster v", env!("CARGO_PKG_VERSION"))),
                     )
                     .child(
                         div()
@@ -2054,14 +2055,15 @@ impl DsMasterView {
                                     .text_color(color(TEXT))
                                     .child("Adaptive triggers"),
                             )
-                            .child(
+                            .child(override_toggle_with_label(
+                                profile.override_triggers,
                                 toggle_switch("qs-trig-override", profile.override_triggers)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         let st = this.config.active_settings_mut();
                                         st.override_triggers = !st.override_triggers;
                                         this.commit_config(cx);
                                     })),
-                            ),
+                            )),
                     )
                     .child(
                         div()
@@ -2214,14 +2216,15 @@ impl DsMasterView {
                                     .text_color(color(TEXT))
                                     .child("Lightbar & controls"),
                             )
-                            .child(
+                            .child(override_toggle_with_label(
+                                profile.override_lightbar,
                                 toggle_switch("qs-lb-override", profile.override_lightbar)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         let st = this.config.active_settings_mut();
                                         st.override_lightbar = !st.override_lightbar;
                                         this.commit_config(cx);
                                     })),
-                            ),
+                            )),
                     )
                     .child(
                         div()
@@ -2384,31 +2387,20 @@ impl DsMasterView {
                     ),
             );
 
-        // Card 3: Polling & latency (wider lead instrument card for sparkline clarity)
+        // Card 3: Controller status (balanced 3-section card matching neighboring cards)
         let scan_label = if connected {
             format!("{:.0} Hz", s.polling_hz)
         } else {
             "Idle".to_owned()
         };
-        let proc_label = if connected {
-            format!("{:.0} µs avg · {} µs max", s.proc_us_ema.round(), s.proc_us_max)
+        let interval_label = if connected && s.polling_hz > 0.5 {
+            format!("{:.1} ms interval", 1000.0 / s.polling_hz)
+        } else if connected {
+            "Measuring…".to_owned()
         } else {
-            "Waiting for HID report stream".to_owned()
+            "Waiting for HID".to_owned()
         };
-        let pill_text = if let Some(sn) = snap {
-            let tr = match sn.transport {
-                Transport::Usb => "USB direct",
-                Transport::Bluetooth => "Bluetooth",
-            };
-            let bat = match sn.battery_status {
-                BatteryStatus::Charging => format!("{}% charging", sn.battery_percent),
-                BatteryStatus::Full => "100% full".to_owned(),
-                _ => format!("{}% battery", sn.battery_percent),
-            };
-            format!("{tr} · {bat}")
-        } else {
-            "Connect DualSense over USB or BT".to_owned()
-        };
+        let interval_is_mono = connected && s.polling_hz > 0.5;
 
         let mut scan_val_el = div()
             .text_size(px(32.0))
@@ -2419,13 +2411,133 @@ impl DsMasterView {
             scan_val_el = scan_val_el.font_family(FONT_MONO);
         }
 
-        let mut proc_el = div()
+        let mut interval_el = div()
             .text_size(px(13.0))
-            .text_color(color(TEXT_MUTED))
-            .child(proc_label);
-        if connected {
-            proc_el = proc_el.font_family(FONT_MONO);
+            .text_color(color(if connected {
+                TEXT_SECONDARY
+            } else {
+                TEXT_MUTED
+            }))
+            .child(interval_label);
+        if interval_is_mono {
+            interval_el = interval_el.font_family(FONT_MONO);
         }
+
+        let active_emu = if connected {
+            s.emulation
+        } else {
+            profile.emulation
+        };
+        let emu_str = match active_emu {
+            EmulationMode::None => "Passthrough",
+            EmulationMode::Xbox360 => "Xbox 360",
+            EmulationMode::DualShock4 => "DualShock 4",
+            EmulationMode::DualSense => "DualSense",
+        };
+        let cloak_on = self
+            .engine
+            .as_ref()
+            .map(Engine::is_cloak_enabled)
+            .unwrap_or(self.config.cloak_physical);
+        let audio_str = if !connected {
+            "—"
+        } else if s.bt_audio_streaming || s.bt_haptics_streaming {
+            "BT streaming"
+        } else if s.headphone_connected {
+            if s.mic_muted_hw {
+                "Jack · muted"
+            } else {
+                "Jack in"
+            }
+        } else if s.mic_muted_hw {
+            "Mic muted"
+        } else {
+            "Internal mic"
+        };
+        let session_str = if connected {
+            fmt_hms(s.connected_secs)
+        } else {
+            "—".to_owned()
+        };
+
+        let status_tile = |label: &'static str, value: String, value_col: u32, mono: bool| {
+            let mut val_el = div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color(value_col))
+                .whitespace_nowrap()
+                .child(value);
+            if mono {
+                val_el = val_el.font_family(FONT_MONO);
+            }
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .px_3()
+                .py_2()
+                .rounded(px(8.0))
+                .bg(color(WELL_BG))
+                .border_1()
+                .border_color(color(BORDER))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(TEXT_MUTED))
+                        .child(label),
+                )
+                .child(val_el)
+        };
+
+        let (batt_pct, batt_label, batt_col) = if let Some(sn) = snap {
+            let pct = sn.battery_percent.min(100);
+            let label = match sn.battery_status {
+                BatteryStatus::Charging => format!("{pct}% · Charging"),
+                BatteryStatus::Full => "100% · Full".to_owned(),
+                _ => format!("{pct}%"),
+            };
+            let col = if matches!(sn.battery_status, BatteryStatus::Charging | BatteryStatus::Full)
+                || pct > 25
+            {
+                SUCCESS
+            } else if pct > 10 {
+                WARN
+            } else {
+                DANGER
+            };
+            (pct, label, col)
+        } else {
+            (0, "—".to_owned(), TEXT_MUTED)
+        };
+
+        let mut batt_val_el = div()
+            .text_size(px(13.0))
+            .text_color(color(if connected {
+                TEXT_SECONDARY
+            } else {
+                TEXT_MUTED
+            }))
+            .child(batt_label);
+        if connected {
+            batt_val_el = batt_val_el.font_family(FONT_MONO);
+        }
+
+        let pill_text = if let Some(sn) = snap {
+            let model = if sn.is_edge {
+                "DualSense Edge"
+            } else {
+                "DualSense"
+            };
+            let tr = match sn.transport {
+                Transport::Usb => "USB direct",
+                Transport::Bluetooth => "Bluetooth",
+            };
+            format!("{model} · {tr}")
+        } else {
+            "Connect DualSense over USB or BT".to_owned()
+        };
 
         let telemetry_card = div()
             .flex()
@@ -2450,10 +2562,61 @@ impl DsMasterView {
                             .min_h(px(24.0))
                             .flex()
                             .items_center()
-                            .text_base()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(color(TEXT))
-                            .child("Polling & latency"),
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(color(TEXT))
+                                    .child("Controller status"),
+                            )
+                            .child(
+                                div()
+                                    .id("qs-open-devinfo")
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(6.0))
+                                    .bg(color(WELL_BG))
+                                    .border_1()
+                                    .border_color(color(BORDER))
+                                    .text_xs()
+                                    .text_color(color(TEXT_SECONDARY))
+                                    .cursor_pointer()
+                                    .hover(|st| {
+                                        st.bg(color(SURFACE_ALT))
+                                            .border_color(color(BORDER_STRONG))
+                                            .text_color(color(TEXT))
+                                    })
+                                    .tooltip(text_tooltip(
+                                        "Open hardware diagnostics & firmware info",
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page = ActivePage::DeviceInfo;
+                                        cx.notify();
+                                    }))
+                                    .child("Details"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(color(TEXT_MUTED))
+                                            .child("Polling rate"),
+                                    )
+                                    .child(scan_val_el),
+                            )
+                            .child(interval_el),
                     )
                     .child(
                         div()
@@ -2463,34 +2626,41 @@ impl DsMasterView {
                             .child(
                                 div()
                                     .flex()
-                                    .items_baseline()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.0))
-                                                    .text_color(color(TEXT_MUTED))
-                                                    .child("Polling rate"),
-                                            )
-                                            .child(scan_val_el),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .font_family(FONT_MONO)
-                                            .text_color(color(TEXT_SECONDARY))
-                                            .child(if connected {
-                                                format!("{} pkts", fmt_thousands(s.packet_count))
-                                            } else {
-                                                "0 pkts".to_owned()
-                                            }),
-                                    ),
+                                    .gap_2()
+                                    .child(status_tile(
+                                        "Emulation",
+                                        emu_str.to_owned(),
+                                        if connected { TEXT } else { TEXT_MUTED },
+                                        false,
+                                    ))
+                                    .child(status_tile(
+                                        "Cloak",
+                                        if cloak_on {
+                                            "Protected".to_owned()
+                                        } else {
+                                            "Off".to_owned()
+                                        },
+                                        if cloak_on { SUCCESS } else { TEXT_MUTED },
+                                        false,
+                                    )),
                             )
-                            .child(proc_el),
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(status_tile(
+                                        "Audio",
+                                        audio_str.to_owned(),
+                                        if connected { TEXT } else { TEXT_MUTED },
+                                        false,
+                                    ))
+                                    .child(status_tile(
+                                        "Session",
+                                        session_str,
+                                        if connected { TEXT } else { TEXT_MUTED },
+                                        connected,
+                                    )),
+                            ),
                     ),
             )
             .child(
@@ -2498,6 +2668,45 @@ impl DsMasterView {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(color(TEXT_SECONDARY))
+                                            .child("Battery"),
+                                    )
+                                    .child(batt_val_el),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(color(WELL_BG))
+                                    .border_1()
+                                    .border_color(color(BORDER))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(batt_pct as f32 / 100.0))
+                                            .rounded_full()
+                                            .bg(color(batt_col)),
+                                    ),
+                            ),
+                    )
                     .child(status_inset_pill(pill_text, connected)),
             );
 
@@ -2954,13 +3163,16 @@ impl DsMasterView {
 
         let mut adaptive_card = section_card_with_action(
             "Adaptive trigger actuators",
-            toggle_switch("tp-trig-override", profile.override_triggers).on_click(cx.listener(
-                |this, _, _, cx| {
-                    let s = this.config.active_settings_mut();
-                    s.override_triggers = !s.override_triggers;
-                    this.commit_config(cx);
-                },
-            )),
+            override_toggle_with_label(
+                profile.override_triggers,
+                toggle_switch("tp-trig-override", profile.override_triggers).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.override_triggers = !s.override_triggers;
+                        this.commit_config(cx);
+                    },
+                )),
+            ),
         )
         .flex_1()
         .child(
@@ -3964,13 +4176,16 @@ impl DsMasterView {
 
         let mut rgb_card = section_card_with_action(
             "Lightbar color",
-            toggle_switch("lp-lb-override", profile.override_lightbar).on_click(cx.listener(
-                |this, _, _, cx| {
-                    let s = this.config.active_settings_mut();
-                    s.override_lightbar = !s.override_lightbar;
-                    this.commit_config(cx);
-                },
-            )),
+            override_toggle_with_label(
+                profile.override_lightbar,
+                toggle_switch("lp-lb-override", profile.override_lightbar).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.override_lightbar = !s.override_lightbar;
+                        this.commit_config(cx);
+                    },
+                )),
+            ),
         )
         .flex_1()
         .child(color_picker_well)

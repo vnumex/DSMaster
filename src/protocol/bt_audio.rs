@@ -325,7 +325,7 @@ mod tests {
             9,
             48,
             true,
-            BtAudioRoute::Both,
+            BtAudioRoute::Headphones,
             &haptics,
             &opus,
             &mut buf,

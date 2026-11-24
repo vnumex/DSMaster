@@ -40,19 +40,18 @@ impl LedBrightness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BtAudioRoute {
     #[default]
+    #[serde(alias = "Both")]
     Speaker,
     Headphones,
-    Both,
 }
 
 impl BtAudioRoute {
-    pub const ALL: [Self; 3] = [Self::Speaker, Self::Headphones, Self::Both];
+    pub const ALL: [Self; 2] = [Self::Speaker, Self::Headphones];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Speaker => "Built-in speaker",
             Self::Headphones => "Headphone jack",
-            Self::Both => "Both",
         }
     }
 
@@ -61,7 +60,6 @@ impl BtAudioRoute {
         match self {
             Self::Speaker => 0x30,
             Self::Headphones => 0x00,
-            Self::Both => 0x20,
         }
     }
 
@@ -69,20 +67,20 @@ impl BtAudioRoute {
     pub fn bt_lane_pid(self) -> u8 {
         match self {
             Self::Speaker => DS_BT_AUDIO_SUBPKT_SPEAKER,
-            Self::Headphones | Self::Both => DS_BT_AUDIO_SUBPKT_HEADSET,
+            Self::Headphones => DS_BT_AUDIO_SUBPKT_HEADSET,
         }
     }
 
     #[inline]
     pub fn needs_mono_fold(self) -> bool {
-        matches!(self, Self::Speaker | Self::Both)
+        matches!(self, Self::Speaker)
     }
 
     #[inline]
     pub fn effective_speaker_volume(self, vol: f32) -> u8 {
         match self {
             Self::Headphones => 0x00,
-            Self::Speaker | Self::Both => scale_speaker_volume(vol),
+            Self::Speaker => scale_speaker_volume(vol),
         }
     }
 
@@ -90,7 +88,7 @@ impl BtAudioRoute {
     pub fn effective_headphone_volume(self, vol: f32) -> u8 {
         match self {
             Self::Speaker => 0x00,
-            Self::Headphones | Self::Both => scale_headphone_volume(vol),
+            Self::Headphones => scale_headphone_volume(vol),
         }
     }
 }
@@ -617,9 +615,5 @@ mod tests {
         assert_eq!(BtAudioRoute::Headphones.audio_control_byte(), 0x00);
         assert_eq!(BtAudioRoute::Headphones.effective_speaker_volume(1.0), 0x00);
         assert_eq!(BtAudioRoute::Headphones.effective_headphone_volume(1.0), 0x7F);
-
-        assert_eq!(BtAudioRoute::Both.audio_control_byte(), 0x20);
-        assert_eq!(BtAudioRoute::Both.effective_speaker_volume(1.0), 0x64);
-        assert_eq!(BtAudioRoute::Both.effective_headphone_volume(1.0), 0x7F);
     }
 }

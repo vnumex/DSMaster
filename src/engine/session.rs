@@ -292,9 +292,6 @@ fn session_loop(
     let mut rate_window_start = Instant::now();
     let mut rate_window_packets = 0u32;
     let mut polling_hz = 0.0f32;
-    let mut proc_us_ema = 0.0f32;
-    let mut proc_us_max = 0u32;
-    let mut packet_count = 0u64;
     let bt_min_interval = Duration::from_millis(8);
 
     info!(
@@ -314,7 +311,7 @@ fn session_loop(
             }
         };
 
-        let processed = match outcome {
+        let (processed, loop_now) = match outcome {
             ReadOutcome::Report(bytes) => {
                 if info.transport == Transport::Bluetooth
                     && bytes.len() >= 78
@@ -328,7 +325,6 @@ fn session_loop(
                     }
                     continue;
                 }
-                let t0 = Instant::now();
                 let raw = match parse_input_report(bytes, info.transport, info.is_edge) {
                     Ok(p) => p,
                     Err(ProtocolError::MinimalBluetoothReport) => {
@@ -341,10 +337,11 @@ fn session_loop(
                     Err(_) => continue,
                 };
 
+                let now = Instant::now();
                 let prof = profile_swap.load();
                 let mut proc_in = process_input(&raw, &calibration, &prof);
                 last_base_proc = Some(proc_in);
-                apply_turbo_state(&mut proc_in, &prof.turbo, &mut turbo_state, Instant::now());
+                apply_turbo_state(&mut proc_in, &prof.turbo, &mut turbo_state, now);
                 mouse.update(&proc_in, &prof);
 
                 let cur_axes = [
@@ -365,7 +362,7 @@ fn session_loop(
                     || raw.touch[1].active
                     || axis_moved
                 {
-                    last_activity = Instant::now();
+                    last_activity = now;
                     prev_buttons = raw.buttons;
                     prev_dpad = raw.dpad;
                     prev_axes = cur_axes;
@@ -450,11 +447,11 @@ fn session_loop(
                 let (test_seq, t_large, t_small, t_dur) = test_rumble.snapshot();
                 if test_seq != last_test_seq {
                     last_test_seq = test_seq;
-                    let until = Instant::now() + Duration::from_millis(t_dur.max(50) as u64);
+                    let until = now + Duration::from_millis(t_dur.max(50) as u64);
                     active_test_rumble = Some((until, t_large, t_small));
                 }
                 if let Some((until, _, _)) = active_test_rumble {
-                    if Instant::now() >= until {
+                    if now >= until {
                         active_test_rumble = None;
                     }
                 }
@@ -548,11 +545,11 @@ fn session_loop(
                     if prof.override_lightbar {
                         last_rgb = compute_animated_lightbar(
                             &prof,
-                            session_start.elapsed().as_secs_f32(),
+                            now.saturating_duration_since(session_start).as_secs_f32(),
                             last_battery_pct,
                             last_battery_status,
                             last_max_trigger,
-                            last_activity.elapsed().as_secs() as u32,
+                            now.saturating_duration_since(last_activity).as_secs() as u32,
                         );
                         last_leds = prof.player_leds;
                         last_led_brightness = prof.player_led_brightness;
@@ -575,16 +572,17 @@ fn session_loop(
                         }
                     }
                     let anim_due = prof.lightbar_mode == LightbarMode::Static && !low_batt_active
-                        || last_anim_eval.elapsed() >= Duration::from_millis(33);
+                        || now.saturating_duration_since(last_anim_eval)
+                            >= Duration::from_millis(33);
                     if anim_due {
-                        last_anim_eval = Instant::now();
+                        last_anim_eval = now;
                         let desired_rgb = compute_animated_lightbar(
                             &prof,
-                            session_start.elapsed().as_secs_f32(),
+                            now.saturating_duration_since(session_start).as_secs_f32(),
                             last_battery_pct,
                             last_battery_status,
                             last_max_trigger,
-                            last_activity.elapsed().as_secs() as u32,
+                            now.saturating_duration_since(last_activity).as_secs() as u32,
                         );
                         if desired_rgb != last_rgb {
                             last_rgb = desired_rgb;
@@ -645,7 +643,7 @@ fn session_loop(
                     || dirty_bt_audio
                 {
                     let can_write = info.transport == Transport::Usb
-                        || last_output_write.elapsed() >= bt_min_interval
+                        || now.saturating_duration_since(last_output_write) >= bt_min_interval
                         || (dirty_rumble && rumble_large == 0 && rumble_small == 0)
                         || release_triggers;
                     if can_write {
@@ -733,35 +731,26 @@ fn session_loop(
                     }
                 }
 
-                let proc_us = t0.elapsed().as_micros() as u32;
-                proc_us_ema = if packet_count == 0 {
-                    proc_us as f32
-                } else {
-                    proc_us_ema * 0.95 + (proc_us as f32) * 0.05
-                };
-                if proc_us > proc_us_max {
-                    proc_us_max = proc_us;
-                }
-                packet_count += 1;
                 rate_window_packets += 1;
-                let elapsed = rate_window_start.elapsed();
+                let elapsed = now.saturating_duration_since(rate_window_start);
                 if elapsed >= Duration::from_millis(500) {
                     polling_hz = rate_window_packets as f32 / elapsed.as_secs_f32();
                     rate_window_packets = 0;
-                    rate_window_start = Instant::now();
+                    rate_window_start = now;
                 }
 
-                proc_in
+                (proc_in, now)
             }
             ReadOutcome::Timeout => {
+                let now = Instant::now();
                 let (test_seq, t_large, t_small, t_dur) = test_rumble.snapshot();
                 if test_seq != last_test_seq {
                     last_test_seq = test_seq;
-                    let until = Instant::now() + Duration::from_millis(t_dur.max(50) as u64);
+                    let until = now + Duration::from_millis(t_dur.max(50) as u64);
                     active_test_rumble = Some((until, t_large, t_small));
                 }
                 if let Some((until, _, _)) = active_test_rumble {
-                    if Instant::now() >= until {
+                    if now >= until {
                         active_test_rumble = None;
                     }
                 }
@@ -845,11 +834,11 @@ fn session_loop(
                 }
                 if turbo_state.is_active() {
                     if let Some(mut base) = last_base_proc {
-                        apply_turbo_state(&mut base, &prof.turbo, &mut turbo_state, Instant::now());
+                        apply_turbo_state(&mut base, &prof.turbo, &mut turbo_state, now);
                         if let Some(vc) = target.as_deref_mut() {
                             let _ = vc.submit(&base);
                         }
-                        base
+                        (base, now)
                     } else {
                         continue;
                     }
@@ -906,9 +895,6 @@ fn session_loop(
             battery_percent: processed.battery_percent,
             battery_status: processed.battery_status,
             polling_hz,
-            proc_us_ema,
-            proc_us_max,
-            packet_count,
             rumble_large,
             rumble_small,
             touch: processed.touch,
@@ -922,8 +908,8 @@ fn session_loop(
             firmware_version,
             hardware_version,
             firmware_date,
-            connected_secs: session_start.elapsed().as_secs() as u32,
-            idle_secs: last_activity.elapsed().as_secs() as u32,
+            connected_secs: loop_now.saturating_duration_since(session_start).as_secs() as u32,
+            idle_secs: loop_now.saturating_duration_since(last_activity).as_secs() as u32,
             headphone_connected: processed.headphone_connected,
             mic_connected: processed.mic_connected,
             mic_muted_hw: processed.mic_muted_hw,
