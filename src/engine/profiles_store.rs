@@ -25,6 +25,8 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub work_in_background: bool,
     pub start_minimized: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     pub profiles: Vec<NamedProfile>,
 }
 
@@ -36,6 +38,7 @@ impl Default for AppConfig {
             auto_switch_profiles: true,
             work_in_background: true,
             start_minimized: false,
+            auto_check_updates: true,
             profiles: vec![NamedProfile {
                 name: "Default".to_owned(),
                 linked_exe: None,
@@ -179,6 +182,7 @@ auto_switch_profiles = true
         let parsed: AppConfig = toml::from_str(raw).unwrap();
         assert!(parsed.work_in_background);
         assert!(!parsed.start_minimized);
+        assert!(parsed.auto_check_updates);
     }
 
     #[test]

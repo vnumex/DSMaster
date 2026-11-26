@@ -9,6 +9,7 @@ mod protocol;
 mod startup;
 mod tray;
 mod ui;
+mod updater;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -31,9 +32,13 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
+    updater::wait_for_parent_exit_if_requested();
+
     let Some(_instance_guard) = tray::acquire_single_instance() else {
         return;
     };
+
+    updater::cleanup_old_binary();
 
     let vigem_available = is_vigem_installed();
     let hidhide_available = HidHideManager::is_available();

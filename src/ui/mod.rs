@@ -59,6 +59,10 @@ use crate::engine::{Engine, SeqLock, TelemetrySnapshot};
 use crate::protocol::{BatteryStatus, BtAudioRoute, BtMicRoute, LedBrightness, Transport};
 use crate::startup::{is_run_at_startup_enabled, set_run_at_startup};
 use crate::tray::{SystemTray, TrayAction, TrayState};
+use crate::updater::{
+    CURRENT_VERSION, ReleaseInfo, UpdateCheckJob, UpdateCheckOutcome, UpdateInstallJob,
+    UpdateInstallPhase, apply_and_relaunch, open_release_url,
+};
 
 fn override_toggle_with_label(enabled: bool, switch: impl IntoElement) -> Div {
     let mut row = div().flex().items_center().gap_2();
@@ -243,12 +247,19 @@ pub struct DsMasterView {
     engine: Option<Engine>,
     engine_error: Option<String>,
     status_notice: Option<String>,
+    status_notice_expires_at: Option<Instant>,
     vigem_available: bool,
     hidhide_available: bool,
     vds_available: bool,
     driver_install: Option<DriverInstallJob>,
-    status_notice_expires_at: Option<Instant>,
     last_install_phase: Option<DriverInstallPhase>,
+    update_check: Option<UpdateCheckJob>,
+    update_check_manual: bool,
+    available_update: Option<ReleaseInfo>,
+    update_banner_dismissed: bool,
+    update_install: Option<UpdateInstallJob>,
+    last_update_phase: Option<UpdateInstallPhase>,
+    update_status_text: Option<String>,
     config: AppConfig,
     page: ActivePage,
     drawer_open: bool,
@@ -270,6 +281,7 @@ pub struct DsMasterView {
     main_scroll: ScrollHandle,
     _watch_task: Task<()>,
     _tray_task: Task<()>,
+    _startup_update_task: Task<()>,
 }
 
 impl DsMasterView {
@@ -303,11 +315,19 @@ impl DsMasterView {
             engine,
             engine_error,
             status_notice: None,
+            status_notice_expires_at: None,
             vigem_available,
             hidhide_available,
             vds_available,
             driver_install: None,
             last_install_phase: None,
+            update_check: None,
+            update_check_manual: false,
+            available_update: None,
+            update_banner_dismissed: false,
+            update_install: None,
+            last_update_phase: None,
+            update_status_text: None,
             config,
             page: ActivePage::QuickSettings,
             drawer_open: true,
@@ -315,7 +335,6 @@ impl DsMasterView {
             selected_remap_src: None,
             last_topology_version: 0,
             handles: Vec::new(),
-            status_notice_expires_at: None,
             selected_idx: 0,
             snapshots: Vec::new(),
             window_ctl,
@@ -330,6 +349,7 @@ impl DsMasterView {
             main_scroll: ScrollHandle::new(),
             _watch_task: Task::ready(()),
             _tray_task: Task::ready(()),
+            _startup_update_task: Task::ready(()),
         };
         this.sync_from_engine();
         this.read_snapshots();
@@ -343,11 +363,19 @@ impl DsMasterView {
                 let res = weak_this.update(cx, |view, cx| {
                     let eng_changed = view.sync_from_engine();
                     let install_changed = view.poll_driver_install();
+                    let update_check_changed = view.poll_update_check();
+                    let update_install_changed = view.poll_update_install(cx);
+                    let notice_expired = view.expire_status_notice();
                     if eng_changed {
                         view.read_snapshots();
                         view.sync_tray_state();
                     }
-                    if eng_changed || install_changed {
+                    if eng_changed
+                        || install_changed
+                        || update_check_changed
+                        || update_install_changed
+                        || notice_expired
+                    {
                         cx.notify();
                     }
                 });
@@ -356,6 +384,19 @@ impl DsMasterView {
                 }
             }
         });
+
+        if this.config.auto_check_updates {
+            this._startup_update_task = cx.spawn(async move |weak_this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(3))
+                    .await;
+                let _ = weak_this.update(cx, |view, cx| {
+                    if view.config.auto_check_updates {
+                        view.start_update_check(false, cx);
+                    }
+                });
+            });
+        }
 
         this._tray_task = cx.spawn_in(window, async move |weak_this, cx| {
             loop {
@@ -414,6 +455,22 @@ impl DsMasterView {
 
     fn clear_status_notice(&mut self) {
         self.status_notice = None;
+        self.status_notice_expires_at = None;
+    }
+
+    fn expire_status_notice(&mut self) -> bool {
+        if self
+            .status_notice_expires_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.clear_status_notice();
+            return true;
+        }
+        false
+    }
+
+    fn commit_config(&mut self, cx: &mut Context<Self>) {
+        self.clear_status_notice();
         if let Some(engine) = &self.engine {
             engine.apply_config(&self.config);
         }
@@ -457,22 +514,6 @@ impl DsMasterView {
             match engine.set_cloak_enabled(next) {
                 Ok(()) => {
                     self.config.cloak_physical = next;
-        self.status_notice_expires_at = None;
-    }
-
-    fn expire_status_notice(&mut self) -> bool {
-        if self
-            .status_notice_expires_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.clear_status_notice();
-            return true;
-        }
-        false
-    }
-
-    fn commit_config(&mut self, cx: &mut Context<Self>) {
-        self.clear_status_notice();
                     self.clear_status_notice();
                     let _ = save_config(&self.config);
                 }
@@ -652,6 +693,283 @@ impl DsMasterView {
         true
     }
 
+    fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_check.is_some() || self.update_install.is_some() {
+            return;
+        }
+        self.update_check = Some(UpdateCheckJob::spawn());
+        self.update_check_manual = manual;
+        if manual {
+            self.update_status_text = Some("Checking GitHub Releases…".to_owned());
+        }
+        cx.notify();
+    }
+
+    fn poll_update_check(&mut self) -> bool {
+        let Some(job) = self.update_check.as_ref() else {
+            return false;
+        };
+        let Some(outcome) = job.take_result() else {
+            return false;
+        };
+        self.update_check = None;
+        let manual = self.update_check_manual;
+        self.update_check_manual = false;
+
+        match outcome {
+            UpdateCheckOutcome::Available(rel) => {
+                let is_new_ver = self
+                    .available_update
+                    .as_ref()
+                    .map(|prev| prev.version.as_str())
+                    != Some(rel.version.as_str());
+                if is_new_ver {
+                    self.update_banner_dismissed = false;
+                }
+                let ver = rel.version.clone();
+                self.available_update = Some(rel);
+                self.update_status_text = Some(format!("DSMaster v{ver} is available"));
+                if manual {
+                    self.set_status_notice(format!("Update available: v{ver}"), Some(NOTICE_TTL));
+                }
+            }
+            UpdateCheckOutcome::UpToDate => {
+                self.available_update = None;
+                self.update_status_text = Some(format!("Up to date (v{CURRENT_VERSION})"));
+                if manual {
+                    self.set_status_notice(
+                        format!("DSMaster v{CURRENT_VERSION} is up to date"),
+                        Some(NOTICE_TTL),
+                    );
+                }
+            }
+            UpdateCheckOutcome::Failed(err) => {
+                if manual {
+                    self.update_status_text = Some(err.clone());
+                    self.set_status_notice(err, Some(NOTICE_ERROR_TTL));
+                }
+            }
+        }
+        true
+    }
+
+    fn start_update_install(&mut self, cx: &mut Context<Self>) {
+        if self.update_install.is_some() {
+            return;
+        }
+        let Some(release) = self.available_update.clone() else {
+            return;
+        };
+        let ver = release.version.clone();
+        self.update_install = Some(UpdateInstallJob::spawn(release));
+        self.last_update_phase = Some(UpdateInstallPhase::Downloading);
+        self.update_status_text = Some(format!("Downloading DSMaster v{ver}…"));
+        self.set_status_notice(format!("Downloading DSMaster v{ver}..."), None);
+        cx.notify();
+    }
+
+    fn poll_update_install(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(job) = self.update_install.as_ref() else {
+            return false;
+        };
+        let phase = job.phase();
+        if self.last_update_phase.as_ref() == Some(&phase) {
+            return false;
+        }
+        let ver = job.release.version.clone();
+
+        match phase {
+            UpdateInstallPhase::Downloading => {
+                self.last_update_phase = Some(UpdateInstallPhase::Downloading);
+                self.update_status_text = Some(format!("Downloading DSMaster v{ver}…"));
+                self.set_status_notice(format!("Downloading DSMaster v{ver}..."), None);
+            }
+            UpdateInstallPhase::Verifying => {
+                self.last_update_phase = Some(UpdateInstallPhase::Verifying);
+                self.update_status_text = Some(format!("Verifying SHA-256 checksum for v{ver}…"));
+                self.set_status_notice(format!("Verifying DSMaster v{ver} checksum..."), None);
+            }
+            UpdateInstallPhase::Extracting => {
+                self.last_update_phase = Some(UpdateInstallPhase::Extracting);
+                self.update_status_text = Some(format!("Extracting DSMaster v{ver}…"));
+                self.set_status_notice(format!("Extracting DSMaster v{ver}..."), None);
+            }
+            UpdateInstallPhase::ReadyToRestart(prepared) => {
+                self.update_install = None;
+                self.last_update_phase = None;
+                let mut did_shutdown = false;
+                match apply_and_relaunch(&prepared, || {
+                    did_shutdown = true;
+                    self.shutdown_all();
+                }) {
+                    Ok(()) => {
+                        self.window_ctl.force_quit.store(true, Ordering::Release);
+                        if !did_shutdown {
+                            self.shutdown_all();
+                        }
+                        cx.quit();
+                    }
+                    Err(err) => {
+                        self.update_status_text = Some(err.clone());
+                        self.set_status_notice(
+                            format!("Update failed: {err}"),
+                            Some(NOTICE_ERROR_TTL),
+                        );
+                    }
+                }
+            }
+            UpdateInstallPhase::Failed(err) => {
+                self.update_install = None;
+                self.last_update_phase = None;
+                self.update_status_text = Some(err.clone());
+                self.set_status_notice(format!("Update failed: {err}"), Some(NOTICE_ERROR_TTL));
+            }
+        }
+        true
+    }
+
+    fn update_install_label(&self) -> Option<&'static str> {
+        self.update_install.as_ref().map(|job| match job.phase() {
+            UpdateInstallPhase::Downloading => "Downloading…",
+            UpdateInstallPhase::Verifying => "Verifying…",
+            UpdateInstallPhase::Extracting => "Extracting…",
+            UpdateInstallPhase::ReadyToRestart(_) => "Restarting…",
+            UpdateInstallPhase::Failed(_) => "Failed",
+        })
+    }
+
+    fn render_update_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.page == ActivePage::Settings || self.update_banner_dismissed {
+            return None;
+        }
+        let release = self.available_update.as_ref()?;
+        let ver = release.version.clone();
+        let release_url = release.release_url.clone();
+        let active_phase = self.update_install_label();
+
+        let action_btn = if let Some(label) = active_phase {
+            div()
+                .h(px(32.0))
+                .px_3()
+                .rounded(px(8.0))
+                .bg(color(SURFACE_ALT))
+                .border_1()
+                .border_color(color(BORDER_STRONG))
+                .flex()
+                .items_center()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color(ACCENT))
+                .whitespace_nowrap()
+                .child(label)
+                .into_any_element()
+        } else {
+            div()
+                .id("upd-banner-install")
+                .h(px(32.0))
+                .px_3()
+                .rounded(px(8.0))
+                .bg(color(ACCENT_SOLID))
+                .border_1()
+                .border_color(color(ACCENT_SOLID))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color(ACCENT_FG))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(|s| {
+                    s.bg(color(ACCENT_SOLID_HOVER))
+                        .border_color(color(ACCENT_SOLID_HOVER))
+                })
+                .child("Update & restart")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_update_install(cx);
+                }))
+                .into_any_element()
+        };
+
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .child(
+                subtle_button("upd-banner-notes", "Release notes").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if let Err(err) = open_release_url(&release_url) {
+                            this.set_status_notice(err, Some(NOTICE_ERROR_TTL));
+                            cx.notify();
+                        }
+                    },
+                )),
+            )
+            .child(action_btn);
+
+        if active_phase.is_none() {
+            actions = actions.child(
+                subtle_button("upd-banner-later", "Later").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.update_banner_dismissed = true;
+                        cx.notify();
+                    },
+                )),
+            );
+        }
+
+        Some(
+            div()
+                .px_4()
+                .py_3()
+                .rounded(px(10.0))
+                .bg(color(SURFACE))
+                .border_1()
+                .border_color(color(BORDER_STRONG))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .size(px(8.0))
+                                .rounded_full()
+                                .bg(color(ACCENT))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(color(TEXT))
+                                        .child(format!("DSMaster v{ver} is available")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(color(TEXT_MUTED))
+                                        .child(format!(
+                                            "Installed: v{CURRENT_VERSION} · Verified via GitHub Releases SHA-256"
+                                        )),
+                                ),
+                        ),
+                )
+                .child(actions),
+        )
+    }
+
     fn selected_snapshot(&self) -> Option<&TelemetrySnapshot> {
         self.snapshots.get(self.selected_idx)
     }
@@ -668,6 +986,7 @@ impl DsMasterView {
     }
 
     fn start_slider_drag(&mut self, slider: ActiveSlider, mouse_x: Pixels, cx: &mut Context<Self>) {
+        self.active_sv_pad = None;
         let bounds = self.slider_bounds.borrow()[slider.slot()];
         let origin_x = f32::from(bounds.origin.x);
         let width = f32::from(bounds.size.width);
@@ -679,6 +998,7 @@ impl DsMasterView {
     }
 
     fn start_sv_drag(&mut self, mouse_x: Pixels, mouse_y: Pixels, cx: &mut Context<Self>) {
+        self.active_slider = None;
         let bounds = *self.sv_pad_bounds.borrow();
         let ox = f32::from(bounds.origin.x);
         let oy = f32::from(bounds.origin.y);
@@ -984,7 +1304,6 @@ impl DsMasterView {
                                     .px_1()
                                     .text_xs()
                                     .font_family(FONT_MONO)
-        self.active_sv_pad = None;
                                     .text_color(color(TEXT_MUTED))
                                     .child(min_label)
                                     .child(max_label),
@@ -996,7 +1315,6 @@ impl DsMasterView {
                             .h(px(28.0))
                             .rounded(px(6.0))
                             .bg(color(WELL_BG))
-        self.active_slider = None;
                             .border_1()
                             .border_color(color(BORDER))
                             .flex()
@@ -1182,18 +1500,32 @@ impl DsMasterView {
                             cx.notify();
                         })),
                     )
-                    .child(
-                        icon_rail_item(
-                            "rail-settings",
-                            settings_icon(20.0, if on_set { TEXT } else { TEXT_MUTED }),
-                            "Settings",
-                            on_set,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.page = ActivePage::Settings;
-                            cx.notify();
-                        })),
-                    ),
+                    .child({
+                        let mut item = div().relative().child(
+                            icon_rail_item(
+                                "rail-settings",
+                                settings_icon(20.0, if on_set { TEXT } else { TEXT_MUTED }),
+                                "Settings",
+                                on_set,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page = ActivePage::Settings;
+                                cx.notify();
+                            })),
+                        );
+                        if self.available_update.is_some() {
+                            item = item.child(
+                                div()
+                                    .absolute()
+                                    .top(px(8.0))
+                                    .right(px(10.0))
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(color(ACCENT)),
+                            );
+                        }
+                        item
+                    }),
             )
     }
 
@@ -1493,12 +1825,41 @@ impl DsMasterView {
                     .items_center()
                     .justify_between()
                     .px_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(TEXT_MUTED))
-                            .child(concat!("DSMaster v", env!("CARGO_PKG_VERSION"))),
-                    )
+                    .child({
+                        let mut ver_row = div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(TEXT_MUTED))
+                                    .child(concat!("DSMaster v", env!("CARGO_PKG_VERSION"))),
+                            );
+                        if let Some(rel) = self.available_update.as_ref() {
+                            ver_row = ver_row.child(
+                                div()
+                                    .id("drawer-update-pill")
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(color(SURFACE_ALT))
+                                    .border_1()
+                                    .border_color(color(BORDER_STRONG))
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(color(ACCENT))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(color(SURFACE_HOVER)))
+                                    .child(format!("v{} ready", rel.version))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page = ActivePage::Settings;
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                        ver_row
+                    })
                     .child(
                         div()
                             .text_xs()
@@ -2131,6 +2492,8 @@ impl DsMasterView {
             );
 
         // Card 2: Lightbar & controls
+        let custom_color_active =
+            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
         let mut swatch_chips = div().w_full().flex().items_center().gap_2();
         for (name, rgb_val) in RGB_SWATCHES {
             let active = custom_color_active && profile.lightbar_rgb == rgb_val;
@@ -2160,10 +2523,14 @@ impl DsMasterView {
             s.active_lightbar_rgb.unwrap_or([0, 112, 255])
         } else if custom_color_active {
             profile.lightbar_rgb
+        } else {
+            s.active_lightbar_rgb.unwrap_or(profile.lightbar_rgb)
         };
         let active_lb_hex = rgb_to_u32(active_lb_rgb);
         let active_lb_label = if !profile.override_lightbar {
             "Native".to_owned()
+        } else if !custom_color_active {
+            profile.lightbar_mode.label().to_owned()
         } else if active_lb_hex == 0 {
             "Off".to_owned()
         } else {
@@ -2491,8 +2858,6 @@ impl DsMasterView {
         let session_str = if connected {
             fmt_hms(s.connected_secs)
         } else {
-        let custom_color_active =
-            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
             "—".to_owned()
         };
 
@@ -2523,14 +2888,10 @@ impl DsMasterView {
                         .text_xs()
                         .text_color(color(TEXT_MUTED))
                         .child(label),
-        } else {
-            s.active_lightbar_rgb.unwrap_or(profile.lightbar_rgb)
                 )
                 .child(val_el)
         };
 
-        } else if !custom_color_active {
-            profile.lightbar_mode.label().to_owned()
         let (batt_pct, batt_label, batt_col) = if let Some(sn) = snap {
             let pct = sn.battery_percent.min(100);
             let label = match sn.battery_status {
@@ -3615,6 +3976,24 @@ impl DsMasterView {
             );
         }
 
+        let mut mic_route_pills = div().flex().flex_wrap().w_full().gap_2();
+        for route in BtMicRoute::ALL {
+            let active = profile.bt_mic_route == route;
+            mic_route_pills = mic_route_pills.child(
+                pill_button(
+                    format!("bt-mic-route-{}", route.label()),
+                    route.label(),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.active_settings_mut().bt_mic_route = route;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
         let cloak_on = self
             .engine
             .as_ref()
@@ -3884,6 +4263,9 @@ impl DsMasterView {
         let profile = self.config.active_settings();
         let snap = self.selected_snapshot().copied().unwrap_or_default();
 
+        let custom_color_active =
+            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
+
         let make_rgb_tile = |name: &'static str, rgb_val: [u8; 3], cx: &mut Context<Self>| {
             let active = custom_color_active && profile.lightbar_rgb == rgb_val;
             let hex = rgb_to_u32(rgb_val);
@@ -3906,24 +4288,6 @@ impl DsMasterView {
                 .hover(|s| s.border_color(color(BORDER_STRONG)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let s = this.config.active_settings_mut();
-        let mut mic_route_pills = div().flex().flex_wrap().w_full().gap_2();
-        for route in BtMicRoute::ALL {
-            let active = profile.bt_mic_route == route;
-            mic_route_pills = mic_route_pills.child(
-                pill_button(
-                    format!("bt-mic-route-{}", route.label()),
-                    route.label(),
-                    active,
-                )
-                .flex_1()
-                .min_w(px(0.0))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.config.active_settings_mut().bt_mic_route = route;
-                    this.commit_config(cx);
-                })),
-            );
-        }
-
                     s.set_custom_lightbar_rgb(rgb_val);
                     this.sync_picker_hsv();
                     this.commit_config(cx);
@@ -3995,6 +4359,8 @@ impl DsMasterView {
         let game_controlling_lb = !profile.override_lightbar && snap.active_lightbar_rgb.is_some();
         let active_rgb = if custom_color_active {
             cur_rgb
+        } else if profile.override_lightbar {
+            snap.active_lightbar_rgb.unwrap_or(cur_rgb)
         } else {
             snap.active_lightbar_rgb.unwrap_or([0, 112, 255])
         };
@@ -4108,6 +4474,8 @@ impl DsMasterView {
             .text_color(color(if lb_is_numeric { TEXT } else { TEXT_SECONDARY }))
             .child(if !profile.override_lightbar && !game_controlling_lb {
                 "Native or game default".to_owned()
+            } else if profile.override_lightbar && !custom_color_active {
+                format!("{} mode active", profile.lightbar_mode.label())
             } else if active_hex == 0 {
                 "LED off".to_owned()
             } else {
@@ -4278,9 +4646,6 @@ impl DsMasterView {
                 )),
             ),
         )
-        let custom_color_active =
-            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
-
         .flex_1()
         .child(color_picker_well)
         .child(swatch_grid)
@@ -4375,8 +4740,6 @@ impl DsMasterView {
                     }))
                     .child(
                         div()
-        } else if profile.override_lightbar {
-            snap.active_lightbar_rgb.unwrap_or(cur_rgb)
                             .text_sm()
                             .font_weight(if active {
                                 FontWeight::MEDIUM
@@ -4490,8 +4853,6 @@ impl DsMasterView {
                             .flex_col()
                             .gap_2()
                             .child(
-            } else if profile.override_lightbar && !custom_color_active {
-                format!("{} mode active", profile.lightbar_mode.label())
                                 div()
                                     .text_size(px(13.0))
                                     .text_color(color(TEXT_SECONDARY))
@@ -6151,6 +6512,185 @@ impl DsMasterView {
                     ),
             );
 
+        let checking_updates = self.update_check.is_some();
+        let active_upd_phase = self.update_install_label();
+        let updates_busy = checking_updates || active_upd_phase.is_some();
+
+        let check_btn = if updates_busy {
+            div()
+                .h(px(32.0))
+                .px_3()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(color(BORDER))
+                .bg(color(SURFACE_ALT))
+                .flex()
+                .items_center()
+                .text_size(px(13.0))
+                .text_color(color(TEXT_MUTED))
+                .whitespace_nowrap()
+                .child(if checking_updates {
+                    "Checking…"
+                } else {
+                    active_upd_phase.unwrap_or("Updating…")
+                })
+                .into_any_element()
+        } else {
+            subtle_button("set-check-updates", "Check now")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_update_check(true, cx);
+                }))
+                .into_any_element()
+        };
+
+        let mut version_badges = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .h(px(28.0))
+                    .px_3()
+                    .rounded(px(6.0))
+                    .bg(color(WELL_BG))
+                    .border_1()
+                    .border_color(color(BORDER))
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.0))
+                    .font_family(FONT_MONO)
+                    .text_color(color(TEXT_SECONDARY))
+                    .child(format!("v{CURRENT_VERSION}")),
+            );
+        if let Some(rel) = self.available_update.as_ref() {
+            version_badges = version_badges.child(
+                div()
+                    .h(px(28.0))
+                    .px_3()
+                    .rounded(px(6.0))
+                    .bg(color(SURFACE_ALT))
+                    .border_1()
+                    .border_color(color(BORDER_STRONG))
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.0))
+                    .font_family(FONT_MONO)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color(ACCENT))
+                    .child(format!("→ v{}", rel.version)),
+            );
+        }
+
+        let updates_status_pill = if let Some(msg) = self.update_status_text.as_ref() {
+            if self.available_update.is_none() && msg.starts_with("Up to date") {
+                status_inset_pill(msg.clone(), true)
+            } else {
+                status_info_pill(msg.clone())
+            }
+        } else {
+            status_info_pill("Checks GitHub Releases and verifies SHA-256 before updating")
+        };
+
+        let mut updates_footer = div()
+            .pt_3()
+            .border_t_1()
+            .border_color(color(BORDER))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(updates_status_pill);
+
+        if let Some(rel) = self.available_update.as_ref() {
+            let release_url = rel.release_url.clone();
+            let install_ctl = if let Some(label) = active_upd_phase {
+                div()
+                    .h(px(32.0))
+                    .px_3()
+                    .rounded(px(8.0))
+                    .bg(color(SURFACE_ALT))
+                    .border_1()
+                    .border_color(color(BORDER_STRONG))
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color(ACCENT))
+                    .whitespace_nowrap()
+                    .child(label)
+                    .into_any_element()
+            } else {
+                div()
+                    .id("set-install-update")
+                    .h(px(32.0))
+                    .px_3()
+                    .rounded(px(8.0))
+                    .bg(color(ACCENT_SOLID))
+                    .border_1()
+                    .border_color(color(ACCENT_SOLID))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color(ACCENT_FG))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| {
+                        s.bg(color(ACCENT_SOLID_HOVER))
+                            .border_color(color(ACCENT_SOLID_HOVER))
+                    })
+                    .child("Update & restart")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_update_install(cx);
+                    }))
+                    .into_any_element()
+            };
+
+            updates_footer = updates_footer.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        subtle_button("set-release-notes", "Release notes").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                if let Err(err) = open_release_url(&release_url) {
+                                    this.set_status_notice(err, Some(NOTICE_ERROR_TTL));
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                    )
+                    .child(install_ctl),
+            );
+        }
+
+        let updates_card = section_card_with_action("Updates", check_btn)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(setting_row(
+                        "Check for updates on startup",
+                        "Quietly check GitHub Releases for new DSMaster versions",
+                        toggle_switch("set-auto-upd-sw", self.config.auto_check_updates).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.config.auto_check_updates = !this.config.auto_check_updates;
+                                this.commit_config(cx);
+                            }),
+                        ),
+                    ))
+                    .child(setting_row(
+                        "Installed version",
+                        "Source: GitHub Releases (vnumex/DSMaster)",
+                        version_badges,
+                    )),
+            )
+            .child(updates_footer);
+
         div()
             .flex()
             .flex_col()
@@ -6172,11 +6712,12 @@ impl DsMasterView {
                             .text_sm()
                             .text_color(color(TEXT_MUTED))
                             .child(
-                                "Application startup, required system drivers, and local configuration",
+                                "Application startup, updates, required system drivers, and local configuration",
                             ),
                     ),
             )
             .child(div().flex().gap_4().child(startup_card).child(drivers_card))
+            .child(updates_card)
             .child(config_card)
     }
 }
@@ -6229,6 +6770,10 @@ impl Render for DsMasterView {
 
         if self.page != ActivePage::Settings {
             canvas_inner = canvas_inner.child(self.render_top_profile_bar(cx));
+        }
+
+        if let Some(banner) = self.render_update_banner(cx) {
+            canvas_inner = canvas_inner.child(banner);
         }
 
         if self.page.shows_controller_stage() {
