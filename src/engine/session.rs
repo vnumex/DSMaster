@@ -570,6 +570,7 @@ fn session_loop(
                         if prof.player_led_brightness != last_led_brightness {
                             last_led_brightness = prof.player_led_brightness;
                             dirty_led_brightness = true;
+                            dirty_player_leds = true;
                         }
                     }
                     let anim_due = prof.lightbar_mode == LightbarMode::Static && !low_batt_active
@@ -1174,12 +1175,26 @@ pub fn compute_animated_lightbar(
     } else {
         1.0
     };
-    let scale = bright * idle_factor;
-    [
+    // Human brightness perception on linear PWM LEDs follows a ~2.4 gamma curve;
+    // linear scaling barely dims until <15%, then drops abruptly to off.
+    let scale = bright.powf(2.4) * idle_factor;
+    if scale <= 0.0 || base == [0, 0, 0] {
+        return [0, 0, 0];
+    }
+    let mut out = [
         ((base[0] as f32) * scale).round().clamp(0.0, 255.0) as u8,
         ((base[1] as f32) * scale).round().clamp(0.0, 255.0) as u8,
         ((base[2] as f32) * scale).round().clamp(0.0, 255.0) as u8,
-    ]
+    ];
+    if out == [0, 0, 0] {
+        let max_ch = base[0].max(base[1]).max(base[2]);
+        for i in 0..3 {
+            if base[i] == max_ch {
+                out[i] = 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1198,14 +1213,23 @@ mod tests {
             idle_dim_secs: 60,
             ..Default::default()
         };
+        // 50% perceptual brightness (~0.5^2.4 = 0.1895 PWM) dims noticeably on hardware LEDs
+        let half = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
+        assert_eq!(half, [19, 38, 9]);
+        // Low non-zero brightness stays dimly lit instead of snapping to black
+        prof.lightbar_brightness = 0.05;
+        let dim = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
+        assert_eq!(dim, [0, 1, 0]);
+        prof.lightbar_brightness = 0.0;
         assert_eq!(
             compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0),
-            [50, 100, 25]
+            [0, 0, 0]
         );
-        // Idle dim scales by 0.15
+        // Idle dim scales further by 0.15
+        prof.lightbar_brightness = 0.5;
         assert_eq!(
             compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 65),
-            [8, 15, 4]
+            [3, 6, 1]
         );
         // Low battery alert overrides to pulsing red
         let lb = compute_animated_lightbar(&prof, 0.25, 15, BatteryStatus::Discharging, 0, 0);

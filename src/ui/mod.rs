@@ -735,7 +735,7 @@ impl DsMasterView {
             }
             UpdateCheckOutcome::UpToDate => {
                 self.available_update = None;
-                self.update_status_text = Some(format!("Up to date (v{CURRENT_VERSION})"));
+                self.update_status_text = Some("Up to date".to_owned());
                 if manual {
                     self.set_status_notice(
                         format!("DSMaster v{CURRENT_VERSION} is up to date"),
@@ -1075,7 +1075,7 @@ impl DsMasterView {
                 self.config.active_settings_mut().bt_mic_gain = val;
             }
             ActiveSlider::LightbarBrightness => {
-                let val = ((t * 20.0).round() / 20.0).clamp(0.0, 1.0);
+                let val = ((t * 100.0).round() / 100.0).clamp(0.0, 1.0);
                 let s = self.config.active_settings_mut();
                 s.override_lightbar = true;
                 s.lightbar_brightness = val;
@@ -1531,7 +1531,6 @@ impl DsMasterView {
 
     /// Secondary 264px Configuration Drawer (`#1C1F23`, 24px/8px group rhythm, quiet text meta)
     fn render_config_drawer(&self, cx: &mut Context<Self>) -> Div {
-        let profile = self.config.active_settings();
         let snap = self.selected_snapshot().copied();
         let count = self.handles.len();
         let connected = snap.is_some();
@@ -1859,34 +1858,7 @@ impl DsMasterView {
                             );
                         }
                         ver_row
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(color(if profile.emulation == EmulationMode::DualSense {
-                                if self.vds_available {
-                                    TEXT_SECONDARY
-                                } else {
-                                    DANGER
-                                }
-                            } else if self.vigem_available {
-                                TEXT_SECONDARY
-                            } else {
-                                DANGER
-                            }))
-                            .child(if profile.emulation == EmulationMode::DualSense {
-                                if self.vds_available {
-                                    "usbip-win2 ready"
-                                } else {
-                                    "usbip-win2 missing"
-                                }
-                            } else if self.vigem_available {
-                                "ViGEm ready"
-                            } else {
-                                "ViGEm missing"
-                            }),
-                    ),
+                    }),
             )
     }
 
@@ -2564,6 +2536,42 @@ impl DsMasterView {
             }),
         );
 
+        let qs_brightness_row = self.render_slider_row_range(
+            "Brightness",
+            format!("{}%", (profile.lightbar_brightness * 100.0).round() as u32),
+            profile.lightbar_brightness,
+            "0%",
+            "100%",
+            ACCENT,
+            ActiveSlider::LightbarBrightness,
+            cx,
+        );
+
+        let mut mode_row = div().flex().flex_wrap().items_center().gap_2().child(
+            div()
+                .w(px(36.0))
+                .flex_shrink_0()
+                .text_size(px(13.0))
+                .text_color(color(TEXT_MUTED))
+                .child("Mode"),
+        );
+        for mode in LightbarMode::ALL {
+            let active = profile.override_lightbar && profile.lightbar_mode == mode;
+            mode_row = mode_row.child(
+                pill_button(
+                    SharedString::from(format!("qs-lb-mode-{}", mode.label())),
+                    mode.label(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let st = this.config.active_settings_mut();
+                    st.override_lightbar = true;
+                    st.lightbar_mode = mode;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
         let mut led_row = div().flex().flex_wrap().items_center().gap_2().child(
             div()
                 .w(px(36.0))
@@ -2698,6 +2706,8 @@ impl DsMasterView {
                                     .child(swatch_chips)
                                     .child(qs_hue_bar),
                             )
+                            .child(qs_brightness_row)
+                            .child(mode_row)
                             .child(led_row),
                     ),
             )
@@ -6543,25 +6553,30 @@ impl DsMasterView {
                 .into_any_element()
         };
 
-        let mut version_badges = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .h(px(28.0))
-                    .px_3()
-                    .rounded(px(6.0))
-                    .bg(color(WELL_BG))
-                    .border_1()
-                    .border_color(color(BORDER))
-                    .flex()
-                    .items_center()
-                    .text_size(px(13.0))
-                    .font_family(FONT_MONO)
-                    .text_color(color(TEXT_SECONDARY))
-                    .child(format!("v{CURRENT_VERSION}")),
-            );
+        let mut version_badges = div().flex().items_center().gap_2();
+        if let Some(msg) = self.update_status_text.as_ref() {
+            let status_pill = if self.available_update.is_none() && msg.starts_with("Up to date") {
+                status_inset_pill(msg.clone(), true)
+            } else {
+                status_info_pill(msg.clone())
+            };
+            version_badges = version_badges.child(status_pill);
+        }
+        version_badges = version_badges.child(
+            div()
+                .h(px(28.0))
+                .px_3()
+                .rounded(px(6.0))
+                .bg(color(WELL_BG))
+                .border_1()
+                .border_color(color(BORDER))
+                .flex()
+                .items_center()
+                .text_size(px(13.0))
+                .font_family(FONT_MONO)
+                .text_color(color(TEXT_SECONDARY))
+                .child(format!("v{CURRENT_VERSION}")),
+        );
         if let Some(rel) = self.available_update.as_ref() {
             version_badges = version_badges.child(
                 div()
@@ -6581,26 +6596,27 @@ impl DsMasterView {
             );
         }
 
-        let updates_status_pill = if let Some(msg) = self.update_status_text.as_ref() {
-            if self.available_update.is_none() && msg.starts_with("Up to date") {
-                status_inset_pill(msg.clone(), true)
-            } else {
-                status_info_pill(msg.clone())
-            }
-        } else {
-            status_info_pill("Checks GitHub Releases and verifies SHA-256 before updating")
-        };
-
-        let mut updates_footer = div()
-            .pt_3()
-            .border_t_1()
-            .border_color(color(BORDER))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(updates_status_pill);
+        let mut updates_card = section_card_with_action("Updates", check_btn).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(setting_row(
+                    "Check for updates on startup",
+                    "Quietly check GitHub Releases for new DSMaster versions",
+                    toggle_switch("set-auto-upd-sw", self.config.auto_check_updates).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.config.auto_check_updates = !this.config.auto_check_updates;
+                            this.commit_config(cx);
+                        }),
+                    ),
+                ))
+                .child(setting_row(
+                    "Installed version",
+                    "Source: GitHub Releases (vnumex/DSMaster)",
+                    version_badges,
+                )),
+        );
 
         if let Some(rel) = self.available_update.as_ref() {
             let release_url = rel.release_url.clone();
@@ -6648,10 +6664,15 @@ impl DsMasterView {
                     .into_any_element()
             };
 
-            updates_footer = updates_footer.child(
+            updates_card = updates_card.child(
                 div()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(color(BORDER))
                     .flex()
+                    .flex_wrap()
                     .items_center()
+                    .justify_end()
                     .gap_2()
                     .child(
                         subtle_button("set-release-notes", "Release notes").on_click(cx.listener(
@@ -6666,30 +6687,6 @@ impl DsMasterView {
                     .child(install_ctl),
             );
         }
-
-        let updates_card = section_card_with_action("Updates", check_btn)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(setting_row(
-                        "Check for updates on startup",
-                        "Quietly check GitHub Releases for new DSMaster versions",
-                        toggle_switch("set-auto-upd-sw", self.config.auto_check_updates).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.config.auto_check_updates = !this.config.auto_check_updates;
-                                this.commit_config(cx);
-                            }),
-                        ),
-                    ))
-                    .child(setting_row(
-                        "Installed version",
-                        "Source: GitHub Releases (vnumex/DSMaster)",
-                        version_badges,
-                    )),
-            )
-            .child(updates_footer);
 
         div()
             .flex()
