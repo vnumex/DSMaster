@@ -23,14 +23,6 @@
 - **Background operation and settings:** Native Windows system tray with quick mode/cloak menu, close-to-tray, start minimized, launch at Windows startup, and single-instance wake-up.
 - **VSync Live Input Monitor:** Wait-free `SeqLock` telemetry snapshots rendered at display refresh rate for sticks, triggers, D-Pad, buttons, Edge paddles, and rumble feedback.
 
-## Coming Soon (Skipped Big Stuff)
-
-- Full keyboard/mouse & multi-step macro timeline editor
-- DSX UDP Port (`6969`) game mod listener API
-- DualSense Edge onboard flash profile editor & PSVR2 Sense controller support
-- Steam Workshop / community profile browser & installed games launcher
-- Multi-language UI localization, lifetime usage stats & achievements, custom gamepad skins, and in-app log viewer
-
 ## Requirements
 
 - Windows 10 or Windows 11 (x64)
