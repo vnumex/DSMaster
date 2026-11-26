@@ -31,7 +31,7 @@ use crate::protocol::constants::{
     DS_BT_AUDIO_BUFFER_LEN_DEFAULT, DS_BT_AUDIO_OPUS_BYTES, DS_BT_MIC_VOLUME_MAX,
 };
 use crate::protocol::{
-    BtAudioRoute, OutputState, Transport, decimate_haptics_48k_to_3k,
+    BtAudioRoute, BtMicRoute, OutputState, Transport, decimate_haptics_48k_to_3k,
     encode_bt_combined_report_35, encode_bt_haptics_report_32, encode_bt_mic_toggle_report_32,
     encode_bt_speaker_report_35, encode_output_report, fold_stereo_to_mono_in_place,
     time_compress_512_to_480,
@@ -655,7 +655,7 @@ fn bt_audio_worker_loop(
     let mut bt_seq: u8 = 0;
     let mut ctrl_bt_seq: u8 = 0;
     let mut pkt_counter: u8 = 0;
-    let mut last_route_hw: Option<(BtAudioRoute, u8, u8)> = None;
+    let mut last_route_hw: Option<(BtAudioRoute, BtMicRoute, u8, u8)> = None;
     let mut last_spk_audible: Option<Instant> = None;
     let mut last_hap_audible: Option<Instant> = None;
     let mut last_mic_rx: Option<Instant> = None;
@@ -747,6 +747,48 @@ fn bt_audio_worker_loop(
             telemetry.haptics_level.store(0, Ordering::Release);
 
             // Manage standalone BT mic open/close toggle when no audio/haptics stream is running.
+            if want_mic {
+                let effective_route = prof
+                    .bt_audio_route
+                    .resolve(bridge.headphone_connected.load(Ordering::Acquire));
+                let spk_vol = prof.bt_speaker_volume.clamp(0.0, 1.0);
+                let spk_hw = effective_route.effective_speaker_volume(spk_vol);
+                let hp_hw = effective_route.effective_headphone_volume(spk_vol);
+                let route_key = (effective_route, prof.bt_mic_route, spk_hw, hp_hw);
+                if last_route_hw != Some(route_key) {
+                    let ctrl_state = OutputState {
+                        update_headphone_volume: true,
+                        headphone_volume: hp_hw,
+                        update_speaker_volume: true,
+                        speaker_volume: spk_hw,
+                        update_mic_volume: true,
+                        mic_volume: DS_BT_MIC_VOLUME_MAX,
+                        update_audio_control: true,
+                        audio_control: effective_route
+                            .audio_control_byte_with_mic(prof.bt_mic_route),
+                        unmute_audio: true,
+                        ..Default::default()
+                    };
+                    if encode_output_report(
+                        &ctrl_state,
+                        Transport::Bluetooth,
+                        ctrl_bt_seq,
+                        write_handle.write_buf_mut(),
+                    )
+                    .is_ok()
+                    {
+                        ctrl_bt_seq = (ctrl_bt_seq + 1) & 0x0F;
+                        if write_handle.write_report(50).is_ok() {
+                            last_route_hw = Some(route_key);
+                            if let Some(t) = timer.as_ref() {
+                                t.wait_us(8_000);
+                            } else {
+                                thread::sleep(Duration::from_millis(8));
+                            }
+                        }
+                    }
+                }
+            }
             let need_open_toggle = want_mic
                 && (!mic_session_open
                     || (!mic_live
@@ -887,10 +929,13 @@ fn bt_audio_worker_loop(
         telemetry.haptics_level.store(hap_peak, Ordering::Release);
 
         if send_speaker || send_haptics {
-            if send_speaker {
-                let spk_hw = prof.bt_audio_route.effective_speaker_volume(spk_vol);
-                let hp_hw = prof.bt_audio_route.effective_headphone_volume(spk_vol);
-                let route_key = (prof.bt_audio_route, spk_hw, hp_hw);
+            let effective_route = prof
+                .bt_audio_route
+                .resolve(bridge.headphone_connected.load(Ordering::Acquire));
+            if send_speaker || want_mic {
+                let spk_hw = effective_route.effective_speaker_volume(spk_vol);
+                let hp_hw = effective_route.effective_headphone_volume(spk_vol);
+                let route_key = (effective_route, prof.bt_mic_route, spk_hw, hp_hw);
                 if new_chime_started || last_route_hw != Some(route_key) {
                     let ctrl_state = OutputState {
                         update_headphone_volume: true,
@@ -900,7 +945,8 @@ fn bt_audio_worker_loop(
                         update_mic_volume: true,
                         mic_volume: DS_BT_MIC_VOLUME_MAX,
                         update_audio_control: true,
-                        audio_control: prof.bt_audio_route.audio_control_byte(),
+                        audio_control: effective_route
+                            .audio_control_byte_with_mic(prof.bt_mic_route),
                         unmute_audio: true,
                         ..Default::default()
                     };
@@ -927,7 +973,7 @@ fn bt_audio_worker_loop(
 
             let mut opus_len = 0usize;
             if send_speaker {
-                if prof.bt_audio_route.needs_mono_fold() {
+                if effective_route.needs_mono_fold() {
                     fold_stereo_to_mono_in_place(&mut spk_512);
                 }
                 time_compress_512_to_480(&spk_512, &mut spk_480);
@@ -946,7 +992,7 @@ fn bt_audio_worker_loop(
                     pkt_counter,
                     DS_BT_AUDIO_BUFFER_LEN_DEFAULT,
                     want_mic,
-                    prof.bt_audio_route,
+                    effective_route,
                     &haptics_64,
                     &opus_out[..opus_len],
                     write_handle.write_buf_mut(),
@@ -958,7 +1004,7 @@ fn bt_audio_worker_loop(
                     pkt_counter,
                     DS_BT_AUDIO_BUFFER_LEN_DEFAULT,
                     want_mic,
-                    prof.bt_audio_route,
+                    effective_route,
                     &opus_out[..opus_len],
                     write_handle.write_buf_mut(),
                 )

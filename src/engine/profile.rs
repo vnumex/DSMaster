@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::emu::EmulationMode;
-use crate::protocol::{AdaptiveTriggerEffect, BtAudioRoute, LedBrightness, MicMuteLed};
+use crate::protocol::{AdaptiveTriggerEffect, BtAudioRoute, BtMicRoute, LedBrightness, MicMuteLed};
 
 fn default_true() -> bool {
     true
@@ -42,6 +42,11 @@ impl LightbarMode {
             Self::BatteryIndicator => "Battery",
             Self::TriggerReactive => "Trigger",
         }
+    }
+
+    #[inline]
+    pub fn uses_custom_color(self) -> bool {
+        matches!(self, Self::Static | Self::Breathing | Self::TriggerReactive)
     }
 }
 
@@ -768,6 +773,8 @@ pub struct ControllerProfile {
     pub bt_mic_enabled: bool,
     #[serde(default = "default_one")]
     pub bt_mic_gain: f32,
+    #[serde(default)]
+    pub bt_mic_route: BtMicRoute,
 }
 
 impl Default for ControllerProfile {
@@ -815,7 +822,7 @@ impl Default for ControllerProfile {
             turbo: TurboConfig::default(),
             bt_speaker_enabled: false,
             bt_speaker_volume: 0.8,
-            bt_audio_route: BtAudioRoute::Speaker,
+            bt_audio_route: BtAudioRoute::Auto,
             bt_haptics_enabled: false,
             bt_haptics_gain: 0.75,
             virtual_audio_device: false,
@@ -823,6 +830,7 @@ impl Default for ControllerProfile {
             virtual_mic_device: false,
             bt_mic_enabled: true,
             bt_mic_gain: 1.0,
+            bt_mic_route: BtMicRoute::Auto,
         }
     }
 }
@@ -857,5 +865,48 @@ impl ControllerProfile {
     pub fn right_trigger_effect(&self) -> AdaptiveTriggerEffect {
         self.right_trigger_preset
             .effect_with_custom(&self.right_custom_trigger)
+    }
+
+    #[inline]
+    pub fn set_custom_lightbar_rgb(&mut self, rgb: [u8; 3]) {
+        self.override_lightbar = true;
+        if !self.lightbar_mode.uses_custom_color() {
+            self.lightbar_mode = LightbarMode::Static;
+        }
+        self.lightbar_rgb = rgb;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_lightbar_rgb_switches_away_from_color_ignoring_modes() {
+        let mut prof = ControllerProfile {
+            override_lightbar: false,
+            lightbar_mode: LightbarMode::BatteryIndicator,
+            lightbar_rgb: [0, 96, 255],
+            ..Default::default()
+        };
+        prof.set_custom_lightbar_rgb([235, 56, 56]);
+        assert!(prof.override_lightbar);
+        assert_eq!(prof.lightbar_mode, LightbarMode::Static);
+        assert_eq!(prof.lightbar_rgb, [235, 56, 56]);
+
+        prof.lightbar_mode = LightbarMode::Rainbow;
+        prof.set_custom_lightbar_rgb([32, 200, 96]);
+        assert_eq!(prof.lightbar_mode, LightbarMode::Static);
+        assert_eq!(prof.lightbar_rgb, [32, 200, 96]);
+
+        prof.lightbar_mode = LightbarMode::Breathing;
+        prof.set_custom_lightbar_rgb([148, 86, 245]);
+        assert_eq!(prof.lightbar_mode, LightbarMode::Breathing);
+        assert_eq!(prof.lightbar_rgb, [148, 86, 245]);
+
+        prof.lightbar_mode = LightbarMode::TriggerReactive;
+        prof.set_custom_lightbar_rgb([242, 208, 107]);
+        assert_eq!(prof.lightbar_mode, LightbarMode::TriggerReactive);
+        assert_eq!(prof.lightbar_rgb, [242, 208, 107]);
     }
 }

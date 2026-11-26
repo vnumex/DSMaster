@@ -24,9 +24,9 @@ use crate::emu::vigem::x360::Xbox360Target;
 use crate::emu::{EmuBackends, EmulationMode, VirtualController};
 use crate::hid::{CancelHandle, DeviceInfo, DualSenseDevice, ReadOutcome};
 use crate::protocol::{
-    AdaptiveTriggerEffect, BatteryStatus, BtAudioRoute, DS_FEATURE_REPORT_CALIBRATION_SIZE,
-    DS_GYRO_RES_PER_DEG_S, DualSenseButtons, ImuCalibration, MicMuteLed, OutputState,
-    ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX,
+    AdaptiveTriggerEffect, BatteryStatus, BtAudioRoute, BtMicRoute,
+    DS_FEATURE_REPORT_CALIBRATION_SIZE, DS_GYRO_RES_PER_DEG_S, DualSenseButtons, ImuCalibration,
+    MicMuteLed, OutputState, ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX,
     constants::{DS_ACC_RES_PER_G, DS_BT_MIC_VOLUME_MAX, DS_INPUT_REPORT_BT},
     encode_output_report, extract_bt_mic_opus, parse_input_report,
 };
@@ -235,6 +235,7 @@ fn session_loop(
     let mut last_test_seq: u16 = test_rumble.snapshot().0;
     let mut active_test_rumble: Option<(Instant, u8, u8)> = None;
     let mut triggers_touched = initial_prof.override_triggers;
+    let mut lightbar_reset_sent = false;
     let mut dirty_rumble = false;
     let mut dirty_lightbar = false;
     let mut dirty_player_leds = false;
@@ -244,7 +245,7 @@ fn session_loop(
     let mut dirty_right_trigger = false;
     let mut release_triggers = false;
     let mut dirty_bt_audio = false;
-    let mut last_bt_audio_hw: Option<(bool, u8, u8, BtAudioRoute, bool, bool)> = None;
+    let mut last_bt_audio_hw: Option<(bool, u8, u8, BtAudioRoute, BtMicRoute, bool, bool)> = None;
 
     let (bt_audio_bridge, mut bt_audio_worker) = if info.transport == Transport::Bluetooth {
         let bridge = Arc::new(SharedAudioBridge::new());
@@ -267,11 +268,14 @@ fn session_loop(
         || initial_prof.override_triggers
         || initial_prof.mic_mute_led != MicMuteLedOverride::Native
     {
+        if initial_prof.override_lightbar {
+            lightbar_reset_sent = true;
+            dirty_lightbar = true;
+        }
         flush_output(
             &mut device,
             &OutputState {
-                update_lightbar: initial_prof.override_lightbar,
-                lightbar_rgb: last_rgb,
+                reset_lightbar: initial_prof.override_lightbar,
                 update_player_leds: initial_prof.override_lightbar,
                 player_leds: last_leds,
                 update_led_brightness: initial_prof.override_lightbar,
@@ -480,9 +484,14 @@ fn session_loop(
                     prof.virtual_speaker_device,
                     prof.virtual_mic_device,
                 );
+                if let Some(b) = bt_audio_bridge.as_ref() {
+                    b.headphone_connected
+                        .store(proc_in.headphone_connected, Ordering::Release);
+                }
+                let effective_audio_route = prof.bt_audio_route.resolve(proc_in.headphone_connected);
                 let bt_vol_norm = prof.bt_speaker_volume;
-                let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
-                let bt_hp_vol_byte = prof.bt_audio_route.effective_headphone_volume(bt_vol_norm);
+                let bt_spk_vol_byte = effective_audio_route.effective_speaker_volume(bt_vol_norm);
+                let bt_hp_vol_byte = effective_audio_route.effective_headphone_volume(bt_vol_norm);
                 let virtual_speaker_open = bt_audio_bridge
                     .as_ref()
                     .is_some_and(|b| b.speaker_endpoint_open.load(Ordering::Acquire));
@@ -490,7 +499,8 @@ fn session_loop(
                     bt_any_audio,
                     bt_spk_vol_byte,
                     bt_hp_vol_byte,
-                    prof.bt_audio_route,
+                    effective_audio_route,
+                    prof.bt_mic_route,
                     bt_hap_active,
                     virtual_speaker_open,
                 );
@@ -639,6 +649,8 @@ fn session_loop(
                         || release_triggers;
                     if can_write {
                         let update_lb = dirty_lightbar && (lightbar_controlled || game_rgb.is_some());
+                        let reset_lb = update_lb && !lightbar_reset_sent;
+                        let send_lb_rgb = update_lb && lightbar_reset_sent;
                         let effective_rgb = if lightbar_controlled {
                             last_rgb
                         } else {
@@ -688,11 +700,13 @@ fn session_loop(
                                 update_mic_volume: dirty_bt_audio,
                                 mic_volume: DS_BT_MIC_VOLUME_MAX,
                                 update_audio_control: dirty_bt_audio,
-                                audio_control: prof.bt_audio_route.audio_control_byte(),
+                                audio_control: effective_audio_route
+                                    .audio_control_byte_with_mic(prof.bt_mic_route),
                                 unmute_audio: dirty_bt_audio,
                                 update_mic_mute_led: update_mute,
                                 mic_mute_led: mute_val,
-                                update_lightbar: update_lb,
+                                reset_lightbar: reset_lb,
+                                update_lightbar: send_lb_rgb,
                                 lightbar_rgb: effective_rgb,
                                 update_player_leds: update_leds,
                                 player_leds: effective_leds,
@@ -710,7 +724,11 @@ fn session_loop(
                             triggers_touched = false;
                         }
                         dirty_rumble = false;
-                        dirty_lightbar = false;
+                        if reset_lb {
+                            lightbar_reset_sent = true;
+                        } else {
+                            dirty_lightbar = false;
+                        }
                         dirty_player_leds = false;
                         dirty_led_brightness = false;
                         dirty_mic_mute_led = false;
@@ -779,9 +797,13 @@ fn session_loop(
                     prof.virtual_mic_device,
                 );
                 if bt_any_audio {
+                    let hp_connected = bt_audio_bridge
+                        .as_ref()
+                        .is_some_and(|b| b.headphone_connected.load(Ordering::Acquire));
+                    let effective_audio_route = prof.bt_audio_route.resolve(hp_connected);
                     let bt_vol_norm = prof.bt_speaker_volume;
-                    let bt_spk_vol_byte = prof.bt_audio_route.effective_speaker_volume(bt_vol_norm);
-                    let bt_hp_vol_byte = prof.bt_audio_route.effective_headphone_volume(bt_vol_norm);
+                    let bt_spk_vol_byte = effective_audio_route.effective_speaker_volume(bt_vol_norm);
+                    let bt_hp_vol_byte = effective_audio_route.effective_headphone_volume(bt_vol_norm);
                     let bt_hap_active = prof.bt_haptics_enabled || bt_hap_test_active;
                     let virtual_speaker_open = bt_audio_bridge
                         .as_ref()
@@ -790,7 +812,8 @@ fn session_loop(
                         true,
                         bt_spk_vol_byte,
                         bt_hp_vol_byte,
-                        prof.bt_audio_route,
+                        effective_audio_route,
+                        prof.bt_mic_route,
                         bt_hap_active,
                         virtual_speaker_open,
                     );
@@ -806,7 +829,8 @@ fn session_loop(
                                 update_mic_volume: true,
                                 mic_volume: DS_BT_MIC_VOLUME_MAX,
                                 update_audio_control: true,
-                                audio_control: prof.bt_audio_route.audio_control_byte(),
+                                audio_control: effective_audio_route
+                                    .audio_control_byte_with_mic(prof.bt_mic_route),
                                 unmute_audio: true,
                                 ..Default::default()
                             },

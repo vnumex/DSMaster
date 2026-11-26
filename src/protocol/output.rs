@@ -40,55 +40,111 @@ impl LedBrightness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BtAudioRoute {
     #[default]
+    Auto,
     #[serde(alias = "Both")]
     Speaker,
     Headphones,
 }
 
 impl BtAudioRoute {
-    pub const ALL: [Self; 2] = [Self::Speaker, Self::Headphones];
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Speaker, Self::Headphones];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Auto => "Auto",
             Self::Speaker => "Built-in speaker",
             Self::Headphones => "Headphone jack",
+        }
+    }
+
+    /// Resolves `Auto` into a concrete hardware output path based on whether a 3.5 mm
+    /// headphone plug is currently detected (`DS_STATUS1_HP_DETECT`).
+    #[inline]
+    pub fn resolve(self, headphone_connected: bool) -> Self {
+        match self {
+            Self::Auto => {
+                if headphone_connected {
+                    Self::Headphones
+                } else {
+                    Self::Speaker
+                }
+            }
+            other => other,
         }
     }
 
     #[inline]
     pub fn audio_control_byte(self) -> u8 {
         match self {
-            Self::Speaker => 0x30,
+            Self::Auto | Self::Speaker => 0x30,
             Self::Headphones => 0x00,
         }
     }
 
     #[inline]
+    pub fn audio_control_byte_with_mic(self, mic: BtMicRoute) -> u8 {
+        self.audio_control_byte() | mic.audio_control_bits()
+    }
+
+    #[inline]
     pub fn bt_lane_pid(self) -> u8 {
         match self {
-            Self::Speaker => DS_BT_AUDIO_SUBPKT_SPEAKER,
+            Self::Auto | Self::Speaker => DS_BT_AUDIO_SUBPKT_SPEAKER,
             Self::Headphones => DS_BT_AUDIO_SUBPKT_HEADSET,
         }
     }
 
     #[inline]
     pub fn needs_mono_fold(self) -> bool {
-        matches!(self, Self::Speaker)
+        matches!(self, Self::Auto | Self::Speaker)
     }
 
     #[inline]
     pub fn effective_speaker_volume(self, vol: f32) -> u8 {
         match self {
             Self::Headphones => 0x00,
-            Self::Speaker => scale_speaker_volume(vol),
+            Self::Auto | Self::Speaker => scale_speaker_volume(vol),
         }
     }
 
     #[inline]
     pub fn effective_headphone_volume(self, vol: f32) -> u8 {
         match self {
-            Self::Speaker => 0x00,
+            Self::Auto | Self::Speaker => 0x00,
             Self::Headphones => scale_headphone_volume(vol),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BtMicRoute {
+    #[default]
+    Auto,
+    Internal,
+    Headset,
+}
+
+impl BtMicRoute {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Internal, Self::Headset];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Internal => "Built-in mic",
+            Self::Headset => "Headset jack",
+        }
+    }
+
+    /// DualSense `audio_control` (`c[7]`) microphone selection bits:
+    /// - `0x00`: Hardware auto-detect (switches to 3.5 mm headset mic when connected)
+    /// - `0x01` (`BIT(0)`): Force built-in controller microphone
+    /// - `0x02` (`BIT(1)`): Force 3.5 mm headset jack microphone
+    #[inline]
+    pub fn audio_control_bits(self) -> u8 {
+        match self {
+            Self::Auto => 0x00,
+            Self::Internal => 0x01,
+            Self::Headset => 0x02,
         }
     }
 }
@@ -131,6 +187,9 @@ pub struct OutputState {
     pub unmute_audio: bool,
     pub update_mic_mute_led: bool,
     pub mic_mute_led: MicMuteLed,
+    /// One-time `DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT` (`valid_flag2 |= 0x02`, `lightbar_setup = 0x02`)
+    /// to clear the controller's default startup blue pulse before sending RGB updates.
+    pub reset_lightbar: bool,
     pub update_lightbar: bool,
     pub lightbar_rgb: [u8; 3],
     pub update_player_leds: bool,
@@ -161,6 +220,7 @@ impl Default for OutputState {
             unmute_audio: false,
             update_mic_mute_led: false,
             mic_mute_led: MicMuteLed::Off,
+            reset_lightbar: false,
             update_lightbar: false,
             lightbar_rgb: [0, 0, 64],
             update_player_leds: false,
@@ -229,12 +289,13 @@ fn write_common_payload(state: &OutputState, c: &mut [u8]) {
         c[8] = state.mic_mute_led as u8;
     }
 
+    if state.reset_lightbar {
+        flag2 |= 0x02;
+        c[41] = 0x02;
+    }
+
     if state.update_lightbar {
         flag1 |= 0x04;
-        if state.disable_led_fade {
-            flag2 |= 0x02;
-            c[41] = 0x02;
-        }
         c[44] = state.lightbar_rgb[0];
         c[45] = state.lightbar_rgb[1];
         c[46] = state.lightbar_rgb[2];
@@ -615,5 +676,73 @@ mod tests {
         assert_eq!(BtAudioRoute::Headphones.audio_control_byte(), 0x00);
         assert_eq!(BtAudioRoute::Headphones.effective_speaker_volume(1.0), 0x00);
         assert_eq!(BtAudioRoute::Headphones.effective_headphone_volume(1.0), 0x7F);
+
+        assert_eq!(BtAudioRoute::Auto.resolve(false), BtAudioRoute::Speaker);
+        assert_eq!(BtAudioRoute::Auto.resolve(true), BtAudioRoute::Headphones);
+        assert_eq!(BtAudioRoute::Speaker.resolve(true), BtAudioRoute::Speaker);
+        assert_eq!(
+            BtAudioRoute::Headphones.resolve(false),
+            BtAudioRoute::Headphones
+        );
+    }
+
+    #[test]
+    fn mic_route_bits_combine_with_output_route() {
+        assert_eq!(
+            BtAudioRoute::Speaker.audio_control_byte_with_mic(BtMicRoute::Auto),
+            0x30
+        );
+        assert_eq!(
+            BtAudioRoute::Speaker.audio_control_byte_with_mic(BtMicRoute::Internal),
+            0x31
+        );
+        assert_eq!(
+            BtAudioRoute::Speaker.audio_control_byte_with_mic(BtMicRoute::Headset),
+            0x32
+        );
+        assert_eq!(
+            BtAudioRoute::Headphones.audio_control_byte_with_mic(BtMicRoute::Auto),
+            0x00
+        );
+        assert_eq!(
+            BtAudioRoute::Headphones.audio_control_byte_with_mic(BtMicRoute::Internal),
+            0x01
+        );
+        assert_eq!(
+            BtAudioRoute::Headphones.audio_control_byte_with_mic(BtMicRoute::Headset),
+            0x02
+        );
+    }
+
+    #[test]
+    fn lightbar_rgb_update_does_not_set_light_out_setup_flag() {
+        let state = OutputState {
+            update_lightbar: true,
+            lightbar_rgb: [26, 255, 194],
+            ..Default::default()
+        };
+
+        let mut usb = [0u8; 48];
+        encode_output_report(&state, Transport::Usb, 0, &mut usb).unwrap();
+        assert_eq!(usb[2] & 0x04, 0x04); // valid_flag1: LIGHTBAR_CONTROL_ENABLE
+        assert_eq!(usb[39] & 0x02, 0x00); // valid_flag2: must NOT set LIGHTBAR_SETUP_CONTROL_ENABLE
+        assert_eq!(usb[42], 0x00); // lightbar_setup: must NOT send LIGHT_OUT (0x02)
+        assert_eq!(usb[45..48], [26, 255, 194]);
+
+        let mut bt = [0u8; 78];
+        encode_output_report(&state, Transport::Bluetooth, 1, &mut bt).unwrap();
+        assert_eq!(bt[4] & 0x04, 0x04);
+        assert_eq!(bt[41] & 0x02, 0x00);
+        assert_eq!(bt[44], 0x00);
+        assert_eq!(bt[47..50], [26, 255, 194]);
+
+        let reset = OutputState {
+            reset_lightbar: true,
+            ..Default::default()
+        };
+        encode_output_report(&reset, Transport::Bluetooth, 2, &mut bt).unwrap();
+        assert_eq!(bt[4] & 0x04, 0x00);
+        assert_eq!(bt[41] & 0x02, 0x02);
+        assert_eq!(bt[44], 0x02);
     }
 }

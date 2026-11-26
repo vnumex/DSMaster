@@ -39,10 +39,14 @@ pub struct TelemetrySnapshot {
     pub bt_haptics_streaming: bool,
     pub bt_speaker_level: u8,
     pub bt_haptics_level: u8,
+    #[allow(dead_code)]
     pub bt_mic_streaming: bool,
     pub bt_mic_level: u8,
+    #[allow(dead_code)]
     pub virtual_audio_attached: bool,
+    #[allow(dead_code)]
     pub virtual_speaker_active: bool,
+    #[allow(dead_code)]
     pub virtual_mic_active: bool,
 }
 

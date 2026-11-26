@@ -8,7 +8,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const NOTICE_TTL: Duration = Duration::from_secs(4);
+const NOTICE_ERROR_TTL: Duration = Duration::from_secs(7);
 
 use gpui::{
     Bounds, ClipboardItem, Context, Div, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -53,7 +56,7 @@ use crate::engine::profiles_store::{
 };
 use crate::engine::session::is_low_battery_alert;
 use crate::engine::{Engine, SeqLock, TelemetrySnapshot};
-use crate::protocol::{BatteryStatus, BtAudioRoute, LedBrightness, Transport};
+use crate::protocol::{BatteryStatus, BtAudioRoute, BtMicRoute, LedBrightness, Transport};
 use crate::startup::{is_run_at_startup_enabled, set_run_at_startup};
 use crate::tray::{SystemTray, TrayAction, TrayState};
 
@@ -244,6 +247,7 @@ pub struct DsMasterView {
     hidhide_available: bool,
     vds_available: bool,
     driver_install: Option<DriverInstallJob>,
+    status_notice_expires_at: Option<Instant>,
     last_install_phase: Option<DriverInstallPhase>,
     config: AppConfig,
     page: ActivePage,
@@ -311,6 +315,7 @@ impl DsMasterView {
             selected_remap_src: None,
             last_topology_version: 0,
             handles: Vec::new(),
+            status_notice_expires_at: None,
             selected_idx: 0,
             snapshots: Vec::new(),
             window_ctl,
@@ -402,13 +407,18 @@ impl DsMasterView {
         }
     }
 
-    fn commit_config(&mut self, cx: &mut Context<Self>) {
+    fn set_status_notice(&mut self, msg: impl Into<String>, ttl: Option<Duration>) {
+        self.status_notice = Some(msg.into());
+        self.status_notice_expires_at = ttl.map(|d| Instant::now() + d);
+    }
+
+    fn clear_status_notice(&mut self) {
         self.status_notice = None;
         if let Some(engine) = &self.engine {
             engine.apply_config(&self.config);
         }
         if let Err(err) = save_config(&self.config) {
-            self.status_notice = Some(format!("Failed to save config: {err}"));
+            self.set_status_notice(format!("Failed to save config: {err}"), Some(NOTICE_ERROR_TTL));
         }
         self.sync_tray_state();
         cx.notify();
@@ -419,15 +429,17 @@ impl DsMasterView {
         self.commit_config(cx);
         match mode {
             EmulationMode::DualSense if !self.vds_available => {
-                self.status_notice = Some(
-                    "usbip-win2 not detected — install vadimgrn/usbip-win2 for Virtual DualSense"
-                        .to_owned(),
+                self.set_status_notice(
+                    "usbip-win2 not detected — install vadimgrn/usbip-win2 for Virtual DualSense",
+                    Some(NOTICE_ERROR_TTL),
                 );
                 cx.notify();
             }
             EmulationMode::Xbox360 | EmulationMode::DualShock4 if !self.vigem_available => {
-                self.status_notice =
-                    Some("ViGEmBus not detected — install Nefarius ViGEmBus".to_owned());
+                self.set_status_notice(
+                    "ViGEmBus not detected — install Nefarius ViGEmBus",
+                    Some(NOTICE_ERROR_TTL),
+                );
                 cx.notify();
             }
             _ => {}
@@ -436,7 +448,7 @@ impl DsMasterView {
 
     fn toggle_cloak(&mut self, cx: &mut Context<Self>) {
         if !self.hidhide_available {
-            self.status_notice = Some("HidHide driver is not installed".to_owned());
+            self.set_status_notice("HidHide driver is not installed", Some(NOTICE_ERROR_TTL));
             cx.notify();
             return;
         }
@@ -445,11 +457,27 @@ impl DsMasterView {
             match engine.set_cloak_enabled(next) {
                 Ok(()) => {
                     self.config.cloak_physical = next;
-                    self.status_notice = None;
+        self.status_notice_expires_at = None;
+    }
+
+    fn expire_status_notice(&mut self) -> bool {
+        if self
+            .status_notice_expires_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.clear_status_notice();
+            return true;
+        }
+        false
+    }
+
+    fn commit_config(&mut self, cx: &mut Context<Self>) {
+        self.clear_status_notice();
+                    self.clear_status_notice();
                     let _ = save_config(&self.config);
                 }
                 Err(e) => {
-                    self.status_notice = Some(format!("HidHide error: {e}"));
+                    self.set_status_notice(format!("HidHide error: {e}"), Some(NOTICE_ERROR_TTL));
                 }
             }
         }
@@ -562,7 +590,7 @@ impl DsMasterView {
         }
         self.driver_install = Some(DriverInstallJob::spawn(kind));
         self.last_install_phase = Some(DriverInstallPhase::Downloading);
-        self.status_notice = Some(format!("Downloading {} installer...", kind.display_name()));
+        self.set_status_notice(format!("Downloading {} installer...", kind.display_name()), None);
         cx.notify();
     }
 
@@ -580,11 +608,11 @@ impl DsMasterView {
         match phase {
             DriverInstallPhase::Downloading => {
                 self.last_install_phase = Some(DriverInstallPhase::Downloading);
-                self.status_notice = Some(format!("Downloading {name} installer..."));
+                self.set_status_notice(format!("Downloading {name} installer..."), None);
             }
             DriverInstallPhase::RunningInstaller => {
                 self.last_install_phase = Some(DriverInstallPhase::RunningInstaller);
-                self.status_notice = Some(format!("Running {name} installer..."));
+                self.set_status_notice(format!("Running {name} installer..."), None);
             }
             DriverInstallPhase::Finished(res) => {
                 self.driver_install = None;
@@ -596,21 +624,28 @@ impl DsMasterView {
                     DriverKind::HidHide => hidhide,
                     DriverKind::UsbipWin2 => vds,
                 };
-                self.status_notice = Some(match res {
+                let (msg, ttl) = match res {
                     Ok(()) if now_installed => {
                         if kind == DriverKind::VigemBus && !was_vigem {
-                            format!(
-                                "{name} installed — restart DSMaster to enable Xbox 360 / DS4"
+                            (
+                                format!(
+                                    "{name} installed — restart DSMaster to enable Xbox 360 / DS4"
+                                ),
+                                NOTICE_ERROR_TTL,
                             )
                         } else {
-                            format!("{name} installed")
+                            (format!("{name} installed"), NOTICE_TTL)
                         }
                     }
-                    Ok(()) => format!(
-                        "{name} installer closed — click Recheck or reboot if prompted"
+                    Ok(()) => (
+                        format!(
+                            "{name} installer closed — click Recheck or reboot if prompted"
+                        ),
+                        NOTICE_ERROR_TTL,
                     ),
-                    Err(err) => format!("{name} install failed: {err}"),
-                });
+                    Err(err) => (format!("{name} install failed: {err}"), NOTICE_ERROR_TTL),
+                };
+                self.set_status_notice(msg, Some(ttl));
                 self.sync_tray_state();
             }
         }
@@ -663,8 +698,7 @@ impl DsMasterView {
         let h = self.picker_hsv.0;
         self.picker_hsv = (h, sat, val);
         let st = self.config.active_settings_mut();
-        st.override_lightbar = true;
-        st.lightbar_rgb = hsv_to_rgb(h, sat, val);
+        st.set_custom_lightbar_rgb(hsv_to_rgb(h, sat, val));
         if let Some(engine) = &self.engine {
             engine.apply_config(&self.config);
         }
@@ -778,20 +812,19 @@ impl DsMasterView {
                 }
                 self.picker_hsv = (h, sat, val);
                 let s = self.config.active_settings_mut();
-                s.override_lightbar = true;
-                s.lightbar_rgb = hsv_to_rgb(h, sat, val);
+                s.set_custom_lightbar_rgb(hsv_to_rgb(h, sat, val));
             }
             ActiveSlider::RedChannel | ActiveSlider::GreenChannel | ActiveSlider::BlueChannel => {
                 let ch = (t * 255.0).round().clamp(0.0, 255.0) as u8;
                 let s = self.config.active_settings_mut();
-                s.override_lightbar = true;
+                let mut rgb = s.lightbar_rgb;
                 match slider {
-                    ActiveSlider::RedChannel => s.lightbar_rgb[0] = ch,
-                    ActiveSlider::GreenChannel => s.lightbar_rgb[1] = ch,
-                    ActiveSlider::BlueChannel => s.lightbar_rgb[2] = ch,
+                    ActiveSlider::RedChannel => rgb[0] = ch,
+                    ActiveSlider::GreenChannel => rgb[1] = ch,
+                    ActiveSlider::BlueChannel => rgb[2] = ch,
                     _ => {}
                 }
-                let rgb = s.lightbar_rgb;
+                s.set_custom_lightbar_rgb(rgb);
                 let (h, sat, val) = rgb_to_hsv(rgb);
                 let keep_h = if sat < 0.01 || val < 0.01 {
                     self.picker_hsv.0
@@ -951,6 +984,7 @@ impl DsMasterView {
                                     .px_1()
                                     .text_xs()
                                     .font_family(FONT_MONO)
+        self.active_sv_pad = None;
                                     .text_color(color(TEXT_MUTED))
                                     .child(min_label)
                                     .child(max_label),
@@ -962,6 +996,7 @@ impl DsMasterView {
                             .h(px(28.0))
                             .rounded(px(6.0))
                             .bg(color(WELL_BG))
+        self.active_slider = None;
                             .border_1()
                             .border_color(color(BORDER))
                             .flex()
@@ -2098,7 +2133,7 @@ impl DsMasterView {
         // Card 2: Lightbar & controls
         let mut swatch_chips = div().w_full().flex().items_center().gap_2();
         for (name, rgb_val) in RGB_SWATCHES {
-            let active = profile.override_lightbar && profile.lightbar_rgb == rgb_val;
+            let active = custom_color_active && profile.lightbar_rgb == rgb_val;
             let hex = rgb_to_u32(rgb_val);
             swatch_chips = swatch_chips.child(
                 div()
@@ -2114,8 +2149,7 @@ impl DsMasterView {
                     .tooltip(text_tooltip(format!("Lightbar: {name}")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let st = this.config.active_settings_mut();
-                        st.override_lightbar = true;
-                        st.lightbar_rgb = rgb_val;
+                        st.set_custom_lightbar_rgb(rgb_val);
                         this.sync_picker_hsv();
                         this.commit_config(cx);
                     })),
@@ -2123,8 +2157,8 @@ impl DsMasterView {
         }
 
         let active_lb_rgb = if !profile.override_lightbar {
-            [0, 112, 255]
-        } else {
+            s.active_lightbar_rgb.unwrap_or([0, 112, 255])
+        } else if custom_color_active {
             profile.lightbar_rgb
         };
         let active_lb_hex = rgb_to_u32(active_lb_rgb);
@@ -2138,7 +2172,7 @@ impl DsMasterView {
                 active_lb_rgb[0], active_lb_rgb[1], active_lb_rgb[2]
             )
         };
-        let lb_label_is_hex = profile.override_lightbar && active_lb_hex != 0;
+        let lb_label_is_hex = custom_color_active && active_lb_hex != 0;
         let mut lb_hex_el = div()
             .text_xs()
             .text_color(color(if lb_label_is_hex {
@@ -2457,6 +2491,8 @@ impl DsMasterView {
         let session_str = if connected {
             fmt_hms(s.connected_secs)
         } else {
+        let custom_color_active =
+            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
             "—".to_owned()
         };
 
@@ -2487,10 +2523,14 @@ impl DsMasterView {
                         .text_xs()
                         .text_color(color(TEXT_MUTED))
                         .child(label),
+        } else {
+            s.active_lightbar_rgb.unwrap_or(profile.lightbar_rgb)
                 )
                 .child(val_el)
         };
 
+        } else if !custom_color_active {
+            profile.lightbar_mode.label().to_owned()
         let (batt_pct, batt_label, batt_col) = if let Some(sn) = snap {
             let pct = sn.battery_percent.min(100);
             let label = match sn.battery_status {
@@ -3524,30 +3564,6 @@ impl DsMasterView {
         let profile = self.config.active_settings();
         let snap = self.selected_snapshot().copied().unwrap_or_default();
 
-        let va_status_pill = if !snap.active {
-            status_inset_pill("No controller", false)
-        } else if snap.transport != Transport::Bluetooth {
-            status_inset_pill("Connect via Bluetooth", false)
-        } else if !self.vds_available {
-            status_inset_pill("Requires usbip-win2", false)
-        } else if snap.virtual_audio_attached {
-            status_inset_pill("Active · Windows Audio", true)
-        } else if profile.virtual_audio_any() {
-            status_inset_pill("Attaching · Windows Audio", false)
-        } else {
-            status_inset_pill("Disabled", false)
-        };
-
-        let bt_status_pill = if !snap.active {
-            status_inset_pill("No controller", false)
-        } else if snap.transport != Transport::Bluetooth {
-            status_inset_pill("Connect via Bluetooth", false)
-        } else if snap.bt_audio_streaming || snap.bt_haptics_streaming || snap.bt_mic_streaming {
-            status_inset_pill("Streaming · Bluetooth", true)
-        } else {
-            status_inset_pill("Ready · Bluetooth", true)
-        };
-
         let mic_gain_row = self.render_slider_row_range(
             "Microphone gain",
             format!("{}%", (profile.bt_mic_gain * 100.0).round() as u32),
@@ -3604,8 +3620,7 @@ impl DsMasterView {
             .as_ref()
             .is_some_and(Engine::is_cloak_enabled);
 
-        let mut virtual_audio_card =
-            section_card_with_action("Windows audio device (Speaker & Mic)", va_status_pill);
+        let mut virtual_audio_card = section_card("Windows audio device (Speaker & Mic)");
 
         if !self.vds_available {
             virtual_audio_card = virtual_audio_card.child(
@@ -3736,58 +3751,7 @@ impl DsMasterView {
                         ),
                 )
                 .child(div().w(px(1.0)).bg(color(BORDER)))
-                .child({
-                    let (mic_bg, mic_border, mic_icon, mic_text_col, mic_label) =
-                        if !profile.virtual_mic_device {
-                            (
-                                WELL_BG,
-                                BORDER,
-                                info_icon(16.0, TEXT_MUTED),
-                                TEXT_MUTED,
-                                "Disabled",
-                            )
-                        } else if snap.mic_muted_hw {
-                            (
-                                WARN_SURFACE,
-                                WARN_BORDER,
-                                info_icon(16.0, WARN),
-                                WARN,
-                                "Muted on controller",
-                            )
-                        } else if snap.bt_mic_streaming || snap.virtual_mic_active {
-                            (
-                                WELL_BG,
-                                BORDER,
-                                check_icon(16.0, SUCCESS),
-                                TEXT,
-                                "Recording · Active",
-                            )
-                        } else if snap.virtual_audio_attached {
-                            (
-                                WELL_BG,
-                                BORDER,
-                                check_icon(16.0, SUCCESS),
-                                TEXT_SECONDARY,
-                                "Ready · Standby",
-                            )
-                        } else if !snap.active || snap.transport != Transport::Bluetooth {
-                            (
-                                WELL_BG,
-                                BORDER,
-                                info_icon(16.0, TEXT_MUTED),
-                                TEXT_MUTED,
-                                "Connect via Bluetooth",
-                            )
-                        } else {
-                            (
-                                WELL_BG,
-                                BORDER,
-                                info_icon(16.0, TEXT_MUTED),
-                                TEXT_MUTED,
-                                "Inactive",
-                            )
-                        };
-
+                .child(
                     div()
                         .flex_1()
                         .min_w(px(0.0))
@@ -3836,29 +3800,9 @@ impl DsMasterView {
                                     div()
                                         .text_size(px(13.0))
                                         .text_color(color(TEXT_SECONDARY))
-                                        .child("Microphone status"),
+                                        .child("Input route"),
                                 )
-                                .child(
-                                    div()
-                                        .h(px(32.0))
-                                        .w_full()
-                                        .px_3()
-                                        .rounded(px(8.0))
-                                        .bg(color(mic_bg))
-                                        .border_1()
-                                        .border_color(color(mic_border))
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_size(px(13.0))
-                                        .child(mic_icon)
-                                        .child(
-                                            div()
-                                                .whitespace_nowrap()
-                                                .text_color(color(mic_text_col))
-                                                .child(mic_label),
-                                        ),
-                                ),
+                                .child(mic_route_pills),
                         )
                         .child(mic_gain_row)
                         .child(meter_row("Microphone input", snap.bt_mic_level, SUCCESS))
@@ -3876,16 +3820,18 @@ impl DsMasterView {
                                             TEXT_MUTED
                                         }))
                                         .child(if snap.mic_muted_hw {
-                                            "Press the mute button on the controller to unmute."
+                                            "Muted on controller — press the mute button to unmute."
+                                        } else if snap.mic_connected {
+                                            "3.5 mm headset microphone detected."
                                         } else {
                                             "Opens automatically when an app records from the DualSense microphone."
                                         }),
                                 ),
-                        )
-                }),
+                        ),
+                ),
         );
 
-        let haptics_card = section_card_with_action("Bluetooth HD haptics", bt_status_pill)
+        let haptics_card = section_card("Bluetooth HD haptics")
             .child(setting_row(
                 "Audio-to-Haptics (voice coils)",
                 "Drives DualSense voice coils from low-passed audio (0x32 / 0x35); pauses legacy rumble while active.",
@@ -3939,7 +3885,7 @@ impl DsMasterView {
         let snap = self.selected_snapshot().copied().unwrap_or_default();
 
         let make_rgb_tile = |name: &'static str, rgb_val: [u8; 3], cx: &mut Context<Self>| {
-            let active = profile.override_lightbar && profile.lightbar_rgb == rgb_val;
+            let active = custom_color_active && profile.lightbar_rgb == rgb_val;
             let hex = rgb_to_u32(rgb_val);
             let hex_text = format!("#{:02X}{:02X}{:02X}", rgb_val[0], rgb_val[1], rgb_val[2]);
             div()
@@ -3960,8 +3906,25 @@ impl DsMasterView {
                 .hover(|s| s.border_color(color(BORDER_STRONG)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let s = this.config.active_settings_mut();
-                    s.override_lightbar = true;
-                    s.lightbar_rgb = rgb_val;
+        let mut mic_route_pills = div().flex().flex_wrap().w_full().gap_2();
+        for route in BtMicRoute::ALL {
+            let active = profile.bt_mic_route == route;
+            mic_route_pills = mic_route_pills.child(
+                pill_button(
+                    format!("bt-mic-route-{}", route.label()),
+                    route.label(),
+                    active,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.active_settings_mut().bt_mic_route = route;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+                    s.set_custom_lightbar_rgb(rgb_val);
                     this.sync_picker_hsv();
                     this.commit_config(cx);
                 }))
@@ -4030,7 +3993,7 @@ impl DsMasterView {
         let cur_rgb = profile.lightbar_rgb;
         let cur_hex = rgb_to_u32(cur_rgb);
         let game_controlling_lb = !profile.override_lightbar && snap.active_lightbar_rgb.is_some();
-        let active_rgb = if profile.override_lightbar {
+        let active_rgb = if custom_color_active {
             cur_rgb
         } else {
             snap.active_lightbar_rgb.unwrap_or([0, 112, 255])
@@ -4139,7 +4102,7 @@ impl DsMasterView {
             cx,
         );
 
-        let lb_is_numeric = (profile.override_lightbar || game_controlling_lb) && active_hex != 0;
+        let lb_is_numeric = (custom_color_active || game_controlling_lb) && active_hex != 0;
         let mut lb_readout_el = div()
             .text_size(px(13.0))
             .text_color(color(if lb_is_numeric { TEXT } else { TEXT_SECONDARY }))
@@ -4234,10 +4197,26 @@ impl DsMasterView {
                     ),
             );
 
-        let ds4_note = if let Some([r, g, b]) = snap.active_lightbar_rgb {
-            format!("Game lightbar active: #{r:02X}{g:02X}{b:02X}")
+        let low_batt_overriding = snap.active
+            && profile.low_battery_alert
+            && snap.battery_status == BatteryStatus::Discharging
+            && snap.battery_percent <= profile.low_battery_threshold;
+        let ds4_note = if low_batt_overriding {
+            format!(
+                "Low-battery flash active ({}% battery) — pulsing red",
+                snap.battery_percent
+            )
         } else if !profile.override_lightbar {
-            "LEDs follow native or game control".to_owned()
+            if let Some([r, g, b]) = snap.active_lightbar_rgb {
+                format!("Game lightbar active: #{r:02X}{g:02X}{b:02X}")
+            } else {
+                "LEDs follow native or game control".to_owned()
+            }
+        } else if !profile.lightbar_mode.uses_custom_color() {
+            format!(
+                "{} effect active — adjust any color control to switch to Static",
+                profile.lightbar_mode.label()
+            )
         } else {
             "Custom lightbar color active on connected DualSense".to_owned()
         };
@@ -4299,6 +4278,9 @@ impl DsMasterView {
                 )),
             ),
         )
+        let custom_color_active =
+            profile.override_lightbar && profile.lightbar_mode.uses_custom_color();
+
         .flex_1()
         .child(color_picker_well)
         .child(swatch_grid)
@@ -4393,6 +4375,8 @@ impl DsMasterView {
                     }))
                     .child(
                         div()
+        } else if profile.override_lightbar {
+            snap.active_lightbar_rgb.unwrap_or(cur_rgb)
                             .text_sm()
                             .font_weight(if active {
                                 FontWeight::MEDIUM
@@ -4506,6 +4490,8 @@ impl DsMasterView {
                             .flex_col()
                             .gap_2()
                             .child(
+            } else if profile.override_lightbar && !custom_color_active {
+                format!("{} mode active", profile.lightbar_mode.label())
                                 div()
                                     .text_size(px(13.0))
                                     .text_color(color(TEXT_SECONDARY))
@@ -5253,7 +5239,7 @@ impl DsMasterView {
             "Hardware diagnostics",
             subtle_button("di-copy-btn", "Copy info").on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
-                this.status_notice = Some("Device info copied to clipboard".to_owned());
+                this.set_status_notice("Device info copied to clipboard", Some(NOTICE_TTL));
                 cx.notify();
             })),
         )
@@ -5385,7 +5371,10 @@ impl DsMasterView {
                         subtle_button("prof-import-btn", "Import clipboard").on_click(cx.listener(
                             |this, _, _, cx| {
                                 let Some(raw) = cx.read_from_clipboard().and_then(|i| i.text()) else {
-                                    this.status_notice = Some("Clipboard has no text to import".to_owned());
+                                    this.set_status_notice(
+                                        "Clipboard has no text to import",
+                                        Some(NOTICE_TTL),
+                                    );
                                     cx.notify();
                                     return;
                                 };
@@ -5401,8 +5390,10 @@ impl DsMasterView {
                                             })
                                     });
                                 let Some(mut prof) = imported else {
-                                    this.status_notice =
-                                        Some("Clipboard is not valid DSMaster profile TOML".to_owned());
+                                    this.set_status_notice(
+                                        "Clipboard is not valid DSMaster profile TOML",
+                                        Some(NOTICE_ERROR_TTL),
+                                    );
                                     cx.notify();
                                     return;
                                 };
@@ -5422,7 +5413,10 @@ impl DsMasterView {
                                 this.config.active_profile = unique_name.clone();
                                 this.sync_picker_hsv();
                                 this.commit_config(cx);
-                                this.status_notice = Some(format!("Imported profile '{unique_name}'"));
+                                this.set_status_notice(
+                                    format!("Imported profile '{unique_name}'"),
+                                    Some(NOTICE_TTL),
+                                );
                                 cx.notify();
                             },
                         )),
@@ -5671,13 +5665,16 @@ impl DsMasterView {
                             match toml::to_string_pretty(&prof_for_copy) {
                                 Ok(text) => {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                    this.status_notice = Some(format!(
-                                        "Copied '{}' TOML to clipboard",
-                                        prof_for_copy.name
-                                    ));
+                                    this.set_status_notice(
+                                        format!("Copied '{}' TOML to clipboard", prof_for_copy.name),
+                                        Some(NOTICE_TTL),
+                                    );
                                 }
                                 Err(e) => {
-                                    this.status_notice = Some(format!("Export failed: {e}"));
+                                    this.set_status_notice(
+                                        format!("Export failed: {e}"),
+                                        Some(NOTICE_ERROR_TTL),
+                                    );
                                 }
                             }
                             cx.notify();
@@ -5851,11 +5848,13 @@ impl DsMasterView {
                                 match set_run_at_startup(next) {
                                     Ok(()) => {
                                         this.run_at_startup = next;
-                                        this.status_notice = None;
+                                        this.clear_status_notice();
                                     }
                                     Err(e) => {
-                                        this.status_notice =
-                                            Some(format!("Startup registry error: {e}"));
+                                        this.set_status_notice(
+                                            format!("Startup registry error: {e}"),
+                                            Some(NOTICE_ERROR_TTL),
+                                        );
                                     }
                                 }
                                 cx.notify();
@@ -6001,7 +6000,7 @@ impl DsMasterView {
             subtle_button("set-recheck-drv", "Recheck").on_click(cx.listener(|this, _, _, cx| {
                 this.recheck_drivers();
                 this.sync_tray_state();
-                this.status_notice = Some("Driver status refreshed".to_owned());
+                this.set_status_notice("Driver status refreshed", Some(NOTICE_TTL));
                 cx.notify();
             })),
         )
@@ -6098,8 +6097,10 @@ impl DsMasterView {
                                 subtle_button("set-open-cfg", "Open config folder").on_click(
                                     cx.listener(|this, _, _, cx| {
                                         if let Err(e) = open_config_dir() {
-                                            this.status_notice =
-                                                Some(format!("Failed to open folder: {e}"));
+                                            this.set_status_notice(
+                                                format!("Failed to open folder: {e}"),
+                                                Some(NOTICE_ERROR_TTL),
+                                            );
                                             cx.notify();
                                         }
                                     }),
@@ -6118,8 +6119,10 @@ impl DsMasterView {
                                             }
                                         }
                                         this.sync_tray_state();
-                                        this.status_notice =
-                                            Some("Configuration reloaded".to_owned());
+                                        this.set_status_notice(
+                                            "Configuration reloaded",
+                                            Some(NOTICE_TTL),
+                                        );
                                         cx.notify();
                                     }),
                                 ),
@@ -6138,8 +6141,10 @@ impl DsMasterView {
                                 }
                                 let _ = save_config(&this.config);
                                 this.sync_tray_state();
-                                this.status_notice =
-                                    Some("Settings reset to defaults".to_owned());
+                                this.set_status_notice(
+                                    "Settings reset to defaults",
+                                    Some(NOTICE_TTL),
+                                );
                                 cx.notify();
                             },
                         )),

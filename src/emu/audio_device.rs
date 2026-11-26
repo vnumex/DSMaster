@@ -182,6 +182,7 @@ pub struct SharedAudioBridge {
     pub speaker_endpoint_open: AtomicBool,
     pub mic_endpoint_open: AtomicBool,
     pub virtual_audio_attached: AtomicBool,
+    pub headphone_connected: AtomicBool,
     speaker_primed: AtomicBool,
 }
 
@@ -196,6 +197,7 @@ impl SharedAudioBridge {
             speaker_endpoint_open: AtomicBool::new(false),
             mic_endpoint_open: AtomicBool::new(false),
             virtual_audio_attached: AtomicBool::new(false),
+            headphone_connected: AtomicBool::new(false),
             speaker_primed: AtomicBool::new(false),
         }
     }
