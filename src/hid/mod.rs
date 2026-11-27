@@ -1,9 +1,11 @@
+pub mod bt_power;
 pub mod device;
 pub mod enumerate;
 pub mod hotplug;
 
 use thiserror::Error;
 
+pub use bt_power::disconnect_bluetooth_device;
 pub use device::{CancelHandle, DualSenseDevice, DualSenseWriteHandle, ReadOutcome};
 pub use enumerate::{DeviceInfo, enumerate_dualsense_devices, inspect_hid_path};
 pub use hotplug::{HotPlugEvent, HotPlugMonitor};

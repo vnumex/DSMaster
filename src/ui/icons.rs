@@ -336,14 +336,14 @@ pub fn info_icon(size: f32, col: u32) -> Div {
 
 pub fn win_min_icon(col: u32) -> Div {
     stroke_icon(14.0, col, MICRO_STROKE, |b, xf| {
-        b.move_to(xf.pt(4.0, 12.0));
-        b.line_to(xf.pt(20.0, 12.0));
+        b.move_to(xf.pt(4.5, 12.86));
+        b.line_to(xf.pt(19.5, 12.86));
     })
 }
 
 pub fn win_max_icon(col: u32) -> Div {
-    stroke_icon(14.0, col, ICON_STROKE, |b, xf| {
-        add_rounded_rect(b, xf, 4.5, 4.5, 15.0, 15.0, 1.5);
+    stroke_icon(14.0, col, MICRO_STROKE, |b, xf| {
+        add_rounded_rect(b, xf, 4.3, 4.3, 15.4, 15.4, 1.5);
     })
 }
 

@@ -12,8 +12,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -38,6 +38,7 @@ const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY_ICON: u32 = WM_APP + 1;
 const WM_TRAY_UPDATE_TIP: u32 = WM_APP + 2;
 const WM_TRAY_WAKE_EXISTING: u32 = WM_APP + 3;
+const WM_TRAY_NOTIFY: u32 = WM_APP + 4;
 
 const ID_TOGGLE_SHOW: usize = 1001;
 const ID_EMU_NONE: usize = 1002;
@@ -145,9 +146,17 @@ impl TrayState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingNotification {
+    title: String,
+    body: String,
+    warning: bool,
+}
+
 struct TrayWindowCtx {
     tx: Sender<TrayAction>,
     state: Arc<Mutex<TrayState>>,
+    pending_notifications: Arc<Mutex<Vec<PendingNotification>>>,
     hicon: HICON,
     taskbar_created_msg: u32,
 }
@@ -155,6 +164,7 @@ struct TrayWindowCtx {
 pub struct SystemTray {
     msg_hwnd: Arc<AtomicIsize>,
     state: Arc<Mutex<TrayState>>,
+    pending_notifications: Arc<Mutex<Vec<PendingNotification>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -162,15 +172,17 @@ impl SystemTray {
     pub fn start(tx: Sender<TrayAction>, initial_state: TrayState) -> Option<Self> {
         let msg_hwnd = Arc::new(AtomicIsize::new(0));
         let state = Arc::new(Mutex::new(initial_state));
+        let pending_notifications = Arc::new(Mutex::new(Vec::new()));
         let (ready_tx, ready_rx) = bounded::<bool>(1);
 
         let hwnd_c = Arc::clone(&msg_hwnd);
         let state_c = Arc::clone(&state);
+        let notif_c = Arc::clone(&pending_notifications);
 
         let thread = thread::Builder::new()
             .name("ds-tray".to_owned())
             .spawn(move || {
-                run_tray_loop(tx, state_c, hwnd_c, ready_tx);
+                run_tray_loop(tx, state_c, notif_c, hwnd_c, ready_tx);
             })
             .ok()?;
 
@@ -178,6 +190,7 @@ impl SystemTray {
             Ok(true) => Some(Self {
                 msg_hwnd,
                 state,
+                pending_notifications,
                 thread: Some(thread),
             }),
             _ => {
@@ -194,6 +207,27 @@ impl SystemTray {
             let hwnd = HWND(raw as *mut core::ffi::c_void);
             unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_TRAY_UPDATE_TIP, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    pub fn show_notification(&self, title: impl Into<String>, body: impl Into<String>, warning: bool) {
+        {
+            let mut q = self.pending_notifications.lock();
+            if q.len() >= 8 {
+                q.remove(0);
+            }
+            q.push(PendingNotification {
+                title: title.into(),
+                body: body.into(),
+                warning,
+            });
+        }
+        let raw = self.msg_hwnd.load(Ordering::Acquire);
+        if raw != 0 {
+            let hwnd = HWND(raw as *mut core::ffi::c_void);
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_TRAY_NOTIFY, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -217,6 +251,7 @@ impl Drop for SystemTray {
 fn run_tray_loop(
     tx: Sender<TrayAction>,
     state: Arc<Mutex<TrayState>>,
+    pending_notifications: Arc<Mutex<Vec<PendingNotification>>>,
     msg_hwnd: Arc<AtomicIsize>,
     ready_tx: Sender<bool>,
 ) {
@@ -275,6 +310,7 @@ fn run_tray_loop(
     let ctx_box = Box::new(TrayWindowCtx {
         tx,
         state: Arc::clone(&state),
+        pending_notifications,
         hicon,
         taskbar_created_msg,
     });
@@ -336,6 +372,16 @@ unsafe extern "system" fn tray_wnd_proc(
                 update_tray_tip(hwnd, ctx.hicon, &tip);
                 return LRESULT(0);
             }
+            WM_TRAY_NOTIFY => {
+                let batch: Vec<PendingNotification> = {
+                    let mut q = ctx.pending_notifications.lock();
+                    std::mem::take(&mut *q)
+                };
+                for item in batch {
+                    send_tray_notification(hwnd, ctx.hicon, &item.title, &item.body, item.warning);
+                }
+                return LRESULT(0);
+            }
             m if ctx.taskbar_created_msg != 0 && m == ctx.taskbar_created_msg => {
                 let tip = ctx.state.lock().tooltip();
                 let _ = add_tray_icon(hwnd, ctx.hicon, &tip);
@@ -360,10 +406,31 @@ unsafe extern "system" fn tray_wnd_proc(
     }
 }
 
-fn fill_tip(buf: &mut [u16; 128], tip: &str) {
+fn fill_utf16<const N: usize>(buf: &mut [u16; N], text: &str) {
     buf.fill(0);
-    for (idx, unit) in tip.encode_utf16().take(127).enumerate() {
+    for (idx, unit) in text.encode_utf16().take(N.saturating_sub(1)).enumerate() {
         buf[idx] = unit;
+    }
+}
+
+fn fill_tip(buf: &mut [u16; 128], tip: &str) {
+    fill_utf16(buf, tip);
+}
+
+fn send_tray_notification(hwnd: HWND, hicon: HICON, title: &str, body: &str, warning: bool) {
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_ICON | NIF_INFO,
+        hIcon: hicon,
+        dwInfoFlags: if warning { NIIF_WARNING } else { NIIF_INFO },
+        ..Default::default()
+    };
+    fill_utf16(&mut nid.szInfoTitle, title);
+    fill_utf16(&mut nid.szInfo, body);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
 

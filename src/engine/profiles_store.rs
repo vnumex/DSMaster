@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::dsu::DEFAULT_DSU_PORT;
+use super::dsx_udp::DEFAULT_DSX_UDP_PORT;
 use super::profile::ControllerProfile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,6 +18,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_dsu_port() -> u16 {
+    DEFAULT_DSU_PORT
+}
+
+fn default_dsx_udp_port() -> u16 {
+    DEFAULT_DSX_UDP_PORT
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -27,6 +37,22 @@ pub struct AppConfig {
     pub start_minimized: bool,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default = "default_true")]
+    pub notify_connect_disconnect: bool,
+    #[serde(default = "default_true")]
+    pub notify_low_battery: bool,
+    #[serde(default)]
+    pub bt_idle_disconnect_mins: u16,
+    #[serde(default)]
+    pub dsu_enabled: bool,
+    #[serde(default = "default_dsu_port")]
+    pub dsu_port: u16,
+    #[serde(default)]
+    pub dsx_udp_enabled: bool,
+    #[serde(default = "default_dsx_udp_port")]
+    pub dsx_udp_port: u16,
     pub profiles: Vec<NamedProfile>,
 }
 
@@ -39,6 +65,14 @@ impl Default for AppConfig {
             work_in_background: true,
             start_minimized: false,
             auto_check_updates: true,
+            notifications_enabled: true,
+            notify_connect_disconnect: true,
+            notify_low_battery: true,
+            bt_idle_disconnect_mins: 0,
+            dsu_enabled: false,
+            dsu_port: default_dsu_port(),
+            dsx_udp_enabled: false,
+            dsx_udp_port: default_dsx_udp_port(),
             profiles: vec![NamedProfile {
                 name: "Default".to_owned(),
                 linked_exe: None,

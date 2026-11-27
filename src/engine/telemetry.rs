@@ -4,6 +4,7 @@ use crate::protocol::{BatteryStatus, DPad, DualSenseButtons, Transport};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TelemetrySnapshot {
+    pub session_id: u64,
     pub active: bool,
     pub is_edge: bool,
     pub transport: Transport,
@@ -53,6 +54,7 @@ pub struct TelemetrySnapshot {
 impl Default for TelemetrySnapshot {
     fn default() -> Self {
         Self {
+            session_id: 0,
             active: false,
             is_edge: false,
             transport: Transport::Usb,

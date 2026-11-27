@@ -1,5 +1,7 @@
 pub mod app_watcher;
 pub mod bt_audio;
+pub mod dsu;
+pub mod dsx_udp;
 pub mod mouse;
 pub mod processing;
 pub mod profile;
@@ -8,6 +10,8 @@ pub mod seqlock;
 pub mod session;
 pub mod telemetry;
 
+pub use dsu::{DsuServer, DsuStatus};
+pub use dsx_udp::{DsxOverrideState, DsxUdpServer, DsxUdpStatus};
 pub use profile::ControllerProfile;
 pub use profiles_store::AppConfig;
 pub use seqlock::SeqLock;
@@ -15,7 +19,7 @@ pub use telemetry::TelemetrySnapshot;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
 use arc_swap::ArcSwap;
@@ -49,6 +53,10 @@ pub struct Engine {
     sessions: Arc<Mutex<HashMap<String, ControllerSessionHandle>>>,
     hidhide: Arc<HidHideManager>,
     cloak_enabled: Arc<AtomicBool>,
+    bt_idle_disconnect_mins: Arc<AtomicU16>,
+    dsx_override: Arc<ArcSwap<DsxOverrideState>>,
+    dsu_server: Mutex<Option<DsuServer>>,
+    dsx_server: Mutex<Option<DsxUdpServer>>,
     last_fg_exe: Arc<Mutex<Option<String>>>,
     topology_version: Arc<AtomicU64>,
     test_rumble: Arc<TestRumbleSignal>,
@@ -61,15 +69,35 @@ impl Engine {
     pub fn start(initial_config: AppConfig) -> Result<Self, EngineError> {
         let initial_profile = initial_config.active_settings();
         let cloak_flag = initial_config.cloak_physical;
+        let initial_bt_idle_mins = initial_config.bt_idle_disconnect_mins;
+        let initial_dsu = (initial_config.dsu_enabled, initial_config.dsu_port);
+        let initial_dsx = (initial_config.dsx_udp_enabled, initial_config.dsx_udp_port);
         let config = Arc::new(Mutex::new(initial_config));
         let profile = Arc::new(ArcSwap::from_pointee(initial_profile));
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let hidhide = Arc::new(HidHideManager::new());
         let cloak_enabled = Arc::new(AtomicBool::new(cloak_flag));
+        let bt_idle_disconnect_mins = Arc::new(AtomicU16::new(initial_bt_idle_mins));
+        let dsx_override = Arc::new(ArcSwap::from_pointee(DsxOverrideState::default()));
         let last_fg_exe = Arc::new(Mutex::new(None));
         let topology_version = Arc::new(AtomicU64::new(1));
         let test_rumble = Arc::new(TestRumbleSignal::default());
         let bt_audio_test = Arc::new(BtAudioTestSignal::default());
+
+        let dsu_server = Mutex::new(if initial_dsu.0 {
+            Some(DsuServer::start(initial_dsu.1, Arc::clone(&sessions)))
+        } else {
+            None
+        });
+        let dsx_server = Mutex::new(if initial_dsx.0 {
+            Some(DsxUdpServer::start(
+                initial_dsx.1,
+                Arc::clone(&dsx_override),
+                Arc::clone(&sessions),
+            ))
+        } else {
+            None
+        });
 
         let vigem = match VigemClient::connect() {
             Ok(c) => Some(c),
@@ -91,6 +119,8 @@ impl Engine {
                 &test_rumble,
                 &bt_audio_test,
                 &cloak_enabled,
+                &bt_idle_disconnect_mins,
+                &dsx_override,
             );
         }
         if cloak_flag {
@@ -109,6 +139,8 @@ impl Engine {
         let config_c = Arc::clone(&config);
         let hidhide_c = Arc::clone(&hidhide);
         let cloak_c = Arc::clone(&cloak_enabled);
+        let bt_idle_c = Arc::clone(&bt_idle_disconnect_mins);
+        let dsx_override_c = Arc::clone(&dsx_override);
         let fg_c = Arc::clone(&last_fg_exe);
         let topo_c = Arc::clone(&topology_version);
         let test_rumble_c = Arc::clone(&test_rumble);
@@ -138,6 +170,8 @@ impl Engine {
                                                 &test_rumble_c,
                                                 &bt_audio_test_c,
                                                 &cloak_c,
+                                                &bt_idle_c,
+                                                &dsx_override_c,
                                             );
                                         }
                                     }
@@ -196,6 +230,10 @@ impl Engine {
             sessions,
             hidhide,
             cloak_enabled,
+            bt_idle_disconnect_mins,
+            dsx_override,
+            dsu_server,
+            dsx_server,
             last_fg_exe,
             topology_version,
             test_rumble,
@@ -220,6 +258,75 @@ impl Engine {
     pub fn apply_config(&self, next: &AppConfig) {
         *self.config.lock() = next.clone();
         self.profile.store(Arc::new(next.active_settings()));
+        self.bt_idle_disconnect_mins
+            .store(next.bt_idle_disconnect_mins, Ordering::Release);
+        self.sync_dsu_server(next.dsu_enabled, next.dsu_port);
+        self.sync_dsx_server(next.dsx_udp_enabled, next.dsx_udp_port);
+    }
+
+    fn sync_dsu_server(&self, enabled: bool, port: u16) {
+        let mut guard = self.dsu_server.lock();
+        match (enabled, guard.as_ref().map(|s| s.status().port)) {
+            (true, Some(cur_port)) if cur_port == port => {}
+            (true, _) => {
+                *guard = None;
+                *guard = Some(DsuServer::start(port, Arc::clone(&self.sessions)));
+            }
+            (false, _) => {
+                *guard = None;
+            }
+        }
+    }
+
+    fn sync_dsx_server(&self, enabled: bool, port: u16) {
+        let mut guard = self.dsx_server.lock();
+        match (enabled, guard.as_ref().map(|s| s.status().port)) {
+            (true, Some(cur_port)) if cur_port == port => {}
+            (true, _) => {
+                *guard = None;
+                *guard = Some(DsxUdpServer::start(
+                    port,
+                    Arc::clone(&self.dsx_override),
+                    Arc::clone(&self.sessions),
+                ));
+            }
+            (false, _) => {
+                *guard = None;
+            }
+        }
+    }
+
+    pub fn dsu_status(&self) -> DsuStatus {
+        self.dsu_server
+            .lock()
+            .as_ref()
+            .map(DsuServer::status)
+            .unwrap_or_default()
+    }
+
+    pub fn dsx_udp_status(&self) -> DsxUdpStatus {
+        self.dsx_server
+            .lock()
+            .as_ref()
+            .map(DsxUdpServer::status)
+            .unwrap_or_default()
+    }
+
+    pub fn clear_dsx_override(&self) {
+        if let Some(srv) = self.dsx_server.lock().as_ref() {
+            srv.clear_override();
+        } else {
+            let prev = **self.dsx_override.load();
+            self.dsx_override.store(Arc::new(DsxOverrideState {
+                active: false,
+                generation: prev.generation.wrapping_add(1),
+                ..Default::default()
+            }));
+        }
+    }
+
+    pub fn disconnect_bluetooth_mac(&self, mac: [u8; 6]) -> Result<(), String> {
+        crate::hid::disconnect_bluetooth_device(mac)
     }
 
     pub fn active_profile_name(&self) -> String {
@@ -256,6 +363,8 @@ impl Engine {
     }
 
     pub fn shutdown(&mut self) {
+        *self.dsu_server.lock() = None;
+        *self.dsx_server.lock() = None;
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
@@ -288,6 +397,7 @@ fn collect_instance_ids(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_attach_device(
     info: DeviceInfo,
     backends: &EmuBackends,
@@ -297,6 +407,8 @@ fn try_attach_device(
     test_rumble: &Arc<TestRumbleSignal>,
     bt_audio_test: &Arc<BtAudioTestSignal>,
     cloak_enabled: &Arc<AtomicBool>,
+    bt_idle_disconnect_mins: &Arc<AtomicU16>,
+    dsx_override: &Arc<ArcSwap<DsxOverrideState>>,
 ) {
     let key = info.device_path.to_ascii_lowercase();
     match DualSenseDevice::open(info) {
@@ -308,6 +420,8 @@ fn try_attach_device(
             Arc::clone(test_rumble),
             Arc::clone(bt_audio_test),
             Arc::clone(cloak_enabled),
+            Arc::clone(bt_idle_disconnect_mins),
+            Arc::clone(dsx_override),
         ) {
             Ok(handle) => {
                 sessions.lock().insert(key, handle);

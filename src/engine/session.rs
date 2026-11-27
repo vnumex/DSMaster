@@ -12,6 +12,7 @@ use windows::Win32::System::Threading::{
 use windows::core::w;
 
 use super::bt_audio::{BtAudioTestSignal, BtAudioWorkerHandle};
+use super::dsx_udp::DsxOverrideState;
 use super::mouse::MouseInjector;
 use super::processing::{ProcessedInput, TurboState, apply_turbo_state, process_input};
 use super::profile::{ControllerProfile, LightbarMode, MicMuteLedOverride};
@@ -26,7 +27,7 @@ use crate::hid::{CancelHandle, DeviceInfo, DualSenseDevice, ReadOutcome};
 use crate::protocol::{
     AdaptiveTriggerEffect, BatteryStatus, BtAudioRoute, BtMicRoute,
     DS_FEATURE_REPORT_CALIBRATION_SIZE, DS_GYRO_RES_PER_DEG_S, DualSenseButtons, ImuCalibration,
-    MicMuteLed, OutputState, ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX,
+    LedBrightness, MicMuteLed, OutputState, ProtocolError, Transport, VIRTUAL_SERIAL_PREFIX,
     constants::{DS_ACC_RES_PER_G, DS_BT_MIC_VOLUME_MAX, DS_INPUT_REPORT_BT},
     encode_output_report, extract_bt_mic_opus, parse_input_report,
 };
@@ -71,6 +72,8 @@ impl TestRumbleSignal {
     }
 }
 
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
 pub struct ControllerSessionHandle {
     pub instance_id: String,
     pub telemetry: Arc<SeqLock<TelemetrySnapshot>>,
@@ -80,6 +83,7 @@ pub struct ControllerSessionHandle {
 }
 
 impl ControllerSessionHandle {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         device: DualSenseDevice,
         backends: EmuBackends,
@@ -88,11 +92,15 @@ impl ControllerSessionHandle {
         test_rumble: Arc<TestRumbleSignal>,
         bt_audio_test: Arc<BtAudioTestSignal>,
         cloak_enabled: Arc<AtomicBool>,
+        bt_idle_disconnect_mins: Arc<AtomicU16>,
+        dsx_override: Arc<ArcSwap<DsxOverrideState>>,
     ) -> std::io::Result<Self> {
+        let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
         let info = device.info().clone();
         let cancel_handle = device.cancel_handle();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(SeqLock::new(TelemetrySnapshot {
+            session_id,
             active: true,
             is_edge: info.is_edge,
             transport: info.transport,
@@ -107,6 +115,7 @@ impl ControllerSessionHandle {
             .name(format!("ds-io-{}", info.product_id))
             .spawn(move || {
                 session_loop(
+                    session_id,
                     device,
                     backends,
                     profile,
@@ -116,6 +125,8 @@ impl ControllerSessionHandle {
                     test_rumble,
                     bt_audio_test,
                     cloak_enabled,
+                    bt_idle_disconnect_mins,
+                    dsx_override,
                 )
             })?;
 
@@ -149,7 +160,9 @@ impl Drop for ControllerSessionHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_loop(
+    session_id: u64,
     mut device: DualSenseDevice,
     backends: EmuBackends,
     profile_swap: Arc<ArcSwap<ControllerProfile>>,
@@ -159,6 +172,8 @@ fn session_loop(
     test_rumble: Arc<TestRumbleSignal>,
     bt_audio_test: Arc<BtAudioTestSignal>,
     cloak_enabled: Arc<AtomicBool>,
+    bt_idle_disconnect_mins: Arc<AtomicU16>,
+    dsx_override: Arc<ArcSwap<DsxOverrideState>>,
 ) {
     let _mmcss = MmcssGuard::enter_games();
     let info = device.info().clone();
@@ -214,8 +229,10 @@ fn session_loop(
     let mut prev_axes: [u8; 6] = [128, 128, 128, 128, 0, 0];
 
     let mut last_override_lightbar = initial_prof.override_lightbar;
+    let mut last_lightbar_controlled = initial_prof.override_lightbar;
     let mut last_override_triggers = initial_prof.override_triggers;
-    let mut last_rgb = compute_animated_lightbar(&initial_prof, 0.0, 100, BatteryStatus::Unknown, 0, 0);
+    let (mut last_rgb, mut last_preview_rgb) =
+        compute_lightbar_colors(&initial_prof, 0.0, 100, BatteryStatus::Unknown, 0, 0);
     let mut game_rgb: Option<[u8; 3]> = None;
     let mut last_leds = initial_prof.player_leds;
     let mut game_leds: Option<u8> = None;
@@ -235,10 +252,15 @@ fn session_loop(
     let mut last_test_seq: u16 = test_rumble.snapshot().0;
     let mut active_test_rumble: Option<(Instant, u8, u8)> = None;
     let mut triggers_touched = initial_prof.override_triggers;
+    let mut lightbar_touched = initial_prof.override_lightbar;
+    let mut player_leds_touched = initial_prof.override_lightbar;
     let mut lightbar_reset_sent = false;
     let mut dirty_rumble = false;
     let mut dirty_lightbar = false;
+    let mut release_lightbar = false;
+    let mut pending_fade_blue = false;
     let mut dirty_player_leds = false;
+    let mut release_player_leds = false;
     let mut dirty_led_brightness = false;
     let mut dirty_mic_mute_led = false;
     let mut dirty_left_trigger = false;
@@ -246,6 +268,8 @@ fn session_loop(
     let mut release_triggers = false;
     let mut dirty_bt_audio = false;
     let mut last_bt_audio_hw: Option<(bool, u8, u8, BtAudioRoute, BtMicRoute, bool, bool)> = None;
+    let mut last_dsx_gen: u64 = dsx_override.load().generation;
+    let mut last_bt_disconnect_attempt: Option<Instant> = None;
 
     let (bt_audio_bridge, mut bt_audio_worker) = if info.transport == Transport::Bluetooth {
         let bridge = Arc::new(SharedAudioBridge::new());
@@ -377,8 +401,19 @@ fn session_loop(
 
                 if prof.emulation != last_requested_mode {
                     last_requested_mode = prof.emulation;
-                    game_rgb = None;
-                    game_leds = None;
+                    let had_game_rgb = game_rgb.take().is_some();
+                    let had_game_leds = game_leds.take().is_some();
+                    let lb_ctrl = prof.override_lightbar
+                        || is_low_battery_alert(&prof, last_battery_pct, last_battery_status);
+                    if had_game_rgb && !lb_ctrl && lightbar_touched {
+                        release_lightbar = true;
+                        pending_fade_blue = false;
+                        dirty_lightbar = false;
+                    }
+                    if had_game_leds && !prof.override_lightbar && player_leds_touched {
+                        release_player_leds = true;
+                        dirty_player_leds = false;
+                    }
                     let had_game_triggers =
                         game_left_trigger.take().is_some() || game_right_trigger.take().is_some();
                     if had_game_triggers && !prof.override_triggers && triggers_touched {
@@ -413,6 +448,9 @@ fn session_loop(
                                 game_rgb = Some(rgb);
                                 if !prof.override_lightbar {
                                     dirty_lightbar = true;
+                                    release_lightbar = false;
+                                    pending_fade_blue = false;
+                                    lightbar_touched = true;
                                 }
                             }
                         }
@@ -422,6 +460,8 @@ fn session_loop(
                                 game_leds = Some(masked);
                                 if !prof.override_lightbar {
                                     dirty_player_leds = true;
+                                    release_player_leds = false;
+                                    player_leds_touched = true;
                                 }
                             }
                         }
@@ -544,7 +584,42 @@ fn session_loop(
                 if prof.override_lightbar != last_override_lightbar {
                     last_override_lightbar = prof.override_lightbar;
                     if prof.override_lightbar {
-                        last_rgb = compute_animated_lightbar(
+                        last_leds = prof.player_leds;
+                        last_led_brightness = prof.player_led_brightness;
+                        dirty_player_leds = true;
+                        dirty_led_brightness = true;
+                        release_player_leds = false;
+                        player_leds_touched = true;
+                    } else if game_leds.is_some() {
+                        dirty_player_leds = true;
+                        dirty_led_brightness = false;
+                        release_player_leds = false;
+                        player_leds_touched = true;
+                    } else {
+                        dirty_player_leds = false;
+                        dirty_led_brightness = false;
+                        if player_leds_touched {
+                            release_player_leds = true;
+                        }
+                    }
+                } else if prof.override_lightbar {
+                    if prof.player_leds != last_leds {
+                        last_leds = prof.player_leds;
+                        dirty_player_leds = true;
+                        player_leds_touched = true;
+                    }
+                    if prof.player_led_brightness != last_led_brightness {
+                        last_led_brightness = prof.player_led_brightness;
+                        dirty_led_brightness = true;
+                        dirty_player_leds = true;
+                        player_leds_touched = true;
+                    }
+                }
+
+                if lightbar_controlled != last_lightbar_controlled {
+                    last_lightbar_controlled = lightbar_controlled;
+                    if lightbar_controlled {
+                        let (hw_rgb, preview_rgb) = compute_lightbar_colors(
                             &prof,
                             now.saturating_duration_since(session_start).as_secs_f32(),
                             last_battery_pct,
@@ -552,33 +627,31 @@ fn session_loop(
                             last_max_trigger,
                             now.saturating_duration_since(last_activity).as_secs() as u32,
                         );
-                        last_leds = prof.player_leds;
-                        last_led_brightness = prof.player_led_brightness;
+                        last_rgb = hw_rgb;
+                        last_preview_rgb = preview_rgb;
                         dirty_lightbar = true;
-                        dirty_player_leds = true;
-                        dirty_led_brightness = true;
+                        release_lightbar = false;
+                        pending_fade_blue = false;
+                        lightbar_touched = true;
+                    } else if game_rgb.is_some() {
+                        dirty_lightbar = true;
+                        release_lightbar = false;
+                        pending_fade_blue = false;
+                        lightbar_touched = true;
                     } else {
-                        dirty_lightbar = game_rgb.is_some();
-                        dirty_player_leds = game_leds.is_some();
+                        dirty_lightbar = false;
+                        pending_fade_blue = false;
+                        if lightbar_touched {
+                            release_lightbar = true;
+                        }
                     }
                 } else if lightbar_controlled {
-                    if prof.override_lightbar {
-                        if prof.player_leds != last_leds {
-                            last_leds = prof.player_leds;
-                            dirty_player_leds = true;
-                        }
-                        if prof.player_led_brightness != last_led_brightness {
-                            last_led_brightness = prof.player_led_brightness;
-                            dirty_led_brightness = true;
-                            dirty_player_leds = true;
-                        }
-                    }
                     let anim_due = prof.lightbar_mode == LightbarMode::Static && !low_batt_active
                         || now.saturating_duration_since(last_anim_eval)
                             >= Duration::from_millis(33);
                     if anim_due {
                         last_anim_eval = now;
-                        let desired_rgb = compute_animated_lightbar(
+                        let (desired_rgb, preview_rgb) = compute_lightbar_colors(
                             &prof,
                             now.saturating_duration_since(session_start).as_secs_f32(),
                             last_battery_pct,
@@ -586,9 +659,11 @@ fn session_loop(
                             last_max_trigger,
                             now.saturating_duration_since(last_activity).as_secs() as u32,
                         );
+                        last_preview_rgb = preview_rgb;
                         if desired_rgb != last_rgb {
                             last_rgb = desired_rgb;
                             dirty_lightbar = true;
+                            lightbar_touched = true;
                         }
                     }
                 }
@@ -634,9 +709,71 @@ fn session_loop(
                     }
                 }
 
+                let dsx = **dsx_override.load();
+                let dsx_rgb = if dsx.active { dsx.lightbar_rgb } else { None };
+                let dsx_leds = if dsx.active { dsx.player_leds } else { None };
+                let dsx_mic = if dsx.active { dsx.mic_mute_led } else { None };
+                let dsx_lt = if dsx.active { dsx.left_trigger } else { None };
+                let dsx_rt = if dsx.active { dsx.right_trigger } else { None };
+
+                if dsx.generation != last_dsx_gen {
+                    last_dsx_gen = dsx.generation;
+                    if dsx.active {
+                        if dsx_rgb.is_some() {
+                            dirty_lightbar = true;
+                            release_lightbar = false;
+                            pending_fade_blue = false;
+                            lightbar_touched = true;
+                        }
+                        if dsx_leds.is_some() {
+                            dirty_player_leds = true;
+                            release_player_leds = false;
+                            player_leds_touched = true;
+                        }
+                        if dsx_mic.is_some() {
+                            dirty_mic_mute_led = true;
+                        }
+                        if dsx_lt.is_some() {
+                            dirty_left_trigger = true;
+                            release_triggers = false;
+                            triggers_touched = true;
+                        }
+                        if dsx_rt.is_some() {
+                            dirty_right_trigger = true;
+                            release_triggers = false;
+                            triggers_touched = true;
+                        }
+                    } else {
+                        if lightbar_controlled || game_rgb.is_some() {
+                            dirty_lightbar = true;
+                        } else if lightbar_touched {
+                            release_lightbar = true;
+                            dirty_lightbar = false;
+                        }
+                        if prof.override_lightbar || game_leds.is_some() {
+                            dirty_player_leds = true;
+                        } else if player_leds_touched {
+                            release_player_leds = true;
+                            dirty_player_leds = false;
+                        }
+                        dirty_mic_mute_led = true;
+                        if prof.override_triggers || game_left_trigger.is_some() || game_right_trigger.is_some() {
+                            dirty_left_trigger = true;
+                            dirty_right_trigger = true;
+                        } else if triggers_touched {
+                            release_triggers = true;
+                            dirty_left_trigger = false;
+                            dirty_right_trigger = false;
+                        }
+                    }
+                }
+
                 if dirty_rumble
                     || dirty_lightbar
+                    || release_lightbar
+                    || pending_fade_blue
                     || dirty_player_leds
+                    || release_player_leds
                     || dirty_led_brightness
                     || dirty_mic_mute_led
                     || dirty_left_trigger
@@ -649,28 +786,58 @@ fn session_loop(
                         || (dirty_rumble && rumble_large == 0 && rumble_small == 0)
                         || release_triggers;
                     if can_write {
-                        let update_lb = dirty_lightbar && (lightbar_controlled || game_rgb.is_some());
-                        let reset_lb = update_lb && !lightbar_reset_sent;
-                        let send_lb_rgb = update_lb && lightbar_reset_sent;
-                        let effective_rgb = if lightbar_controlled {
-                            last_rgb
+                        let (fade_blue, reset_lb, send_lb_rgb, effective_rgb) = if release_lightbar {
+                            (false, false, true, [0, 0, 0])
+                        } else if pending_fade_blue {
+                            (true, false, false, [0, 0, 0])
                         } else {
-                            game_rgb.unwrap_or(last_rgb)
+                            let update_lb = dirty_lightbar
+                                && (lightbar_controlled || dsx_rgb.is_some() || game_rgb.is_some());
+                            let reset_lb = update_lb && !lightbar_reset_sent;
+                            let send_lb_rgb = update_lb && lightbar_reset_sent;
+                            let rgb = if low_batt_active {
+                                last_rgb
+                            } else if let Some(mod_rgb) = dsx_rgb {
+                                mod_rgb
+                            } else if lightbar_controlled {
+                                last_rgb
+                            } else {
+                                game_rgb.unwrap_or(last_rgb)
+                            };
+                            (false, reset_lb, send_lb_rgb, rgb)
                         };
-                        let update_leds =
-                            dirty_player_leds && (prof.override_lightbar || game_leds.is_some());
-                        let effective_leds = if prof.override_lightbar {
+                        let update_leds = release_player_leds
+                            || (dirty_player_leds
+                                && (dsx_leds.is_some()
+                                    || prof.override_lightbar
+                                    || game_leds.is_some()));
+                        let effective_leds = if release_player_leds {
+                            0x00
+                        } else if let Some(mod_leds) = dsx_leds {
+                            mod_leds
+                        } else if prof.override_lightbar {
                             last_leds
                         } else {
                             game_leds.unwrap_or(last_leds)
                         };
-                        let update_bright = dirty_led_brightness && prof.override_lightbar;
-                        let update_mute = dirty_mic_mute_led && prof.mic_mute_led.to_protocol().is_some();
-                        let mute_val = prof.mic_mute_led.to_protocol().unwrap_or(MicMuteLed::Off);
+                        let update_bright = release_player_leds
+                            || (dirty_led_brightness && prof.override_lightbar);
+                        let effective_bright = if release_player_leds {
+                            LedBrightness::High
+                        } else {
+                            last_led_brightness
+                        };
+                        let update_mute = dirty_mic_mute_led
+                            && (dsx_mic.is_some() || prof.mic_mute_led.to_protocol().is_some());
+                        let mute_val = dsx_mic
+                            .or_else(|| prof.mic_mute_led.to_protocol())
+                            .unwrap_or(MicMuteLed::Off);
                         let update_left_trig = release_triggers || dirty_left_trigger;
                         let update_right_trig = release_triggers || dirty_right_trigger;
                         let effective_left_trig = if release_triggers {
                             AdaptiveTriggerEffect::Off
+                        } else if let Some(mod_lt) = dsx_lt {
+                            mod_lt
                         } else if prof.override_triggers {
                             last_left_trigger
                         } else {
@@ -680,6 +847,8 @@ fn session_loop(
                         };
                         let effective_right_trig = if release_triggers {
                             AdaptiveTriggerEffect::Off
+                        } else if let Some(mod_rt) = dsx_rt {
+                            mod_rt
                         } else if prof.override_triggers {
                             last_right_trigger
                         } else {
@@ -707,12 +876,13 @@ fn session_loop(
                                 update_mic_mute_led: update_mute,
                                 mic_mute_led: mute_val,
                                 reset_lightbar: reset_lb,
+                                fade_lightbar_blue: fade_blue,
                                 update_lightbar: send_lb_rgb,
                                 lightbar_rgb: effective_rgb,
                                 update_player_leds: update_leds,
                                 player_leds: effective_leds,
                                 update_led_brightness: update_bright,
-                                led_brightness: last_led_brightness,
+                                led_brightness: effective_bright,
                                 update_left_trigger: update_left_trig,
                                 left_trigger: effective_left_trig,
                                 update_right_trigger: update_right_trig,
@@ -725,12 +895,28 @@ fn session_loop(
                             triggers_touched = false;
                         }
                         dirty_rumble = false;
-                        if reset_lb {
+                        if release_lightbar {
+                            release_lightbar = false;
+                            if info.transport == Transport::Bluetooth {
+                                pending_fade_blue = true;
+                            } else {
+                                lightbar_touched = false;
+                                lightbar_reset_sent = false;
+                            }
+                        } else if pending_fade_blue {
+                            pending_fade_blue = false;
+                            lightbar_touched = false;
+                            lightbar_reset_sent = false;
+                        } else if reset_lb {
                             lightbar_reset_sent = true;
                         } else {
                             dirty_lightbar = false;
                         }
+                        if release_player_leds {
+                            player_leds_touched = false;
+                        }
                         dirty_player_leds = false;
+                        release_player_leds = false;
                         dirty_led_brightness = false;
                         dirty_mic_mute_led = false;
                         dirty_left_trigger = false;
@@ -749,10 +935,27 @@ fn session_loop(
                     rate_window_start = now;
                 }
 
+                maybe_idle_disconnect_bt(
+                    info.transport,
+                    mac_address,
+                    &bt_idle_disconnect_mins,
+                    last_activity,
+                    now,
+                    &mut last_bt_disconnect_attempt,
+                );
+
                 (proc_in, now)
             }
             ReadOutcome::Timeout => {
                 let now = Instant::now();
+                maybe_idle_disconnect_bt(
+                    info.transport,
+                    mac_address,
+                    &bt_idle_disconnect_mins,
+                    last_activity,
+                    now,
+                    &mut last_bt_disconnect_attempt,
+                );
                 let (test_seq, t_large, t_small, t_dur) = test_rumble.snapshot();
                 if test_seq != last_test_seq {
                     last_test_seq = test_seq;
@@ -886,7 +1089,19 @@ fn session_loop(
                 (false, false, false)
             };
 
+        let dsx_now = **dsx_override.load();
+        let active_lb_preview = if is_low_battery_alert(&profile_swap.load(), last_battery_pct, last_battery_status) {
+            Some(last_preview_rgb)
+        } else if dsx_now.active && dsx_now.lightbar_rgb.is_some() {
+            dsx_now.lightbar_rgb
+        } else if last_override_lightbar {
+            Some(last_preview_rgb)
+        } else {
+            game_rgb
+        };
+
         telemetry.write(TelemetrySnapshot {
+            session_id,
             active: true,
             is_edge: info.is_edge,
             transport: info.transport,
@@ -905,11 +1120,7 @@ fn session_loop(
             rumble_large,
             rumble_small,
             touch: processed.touch,
-            active_lightbar_rgb: if last_override_lightbar || is_low_battery_alert(&profile_swap.load(), last_battery_pct, last_battery_status) {
-                Some(last_rgb)
-            } else {
-                game_rgb
-            },
+            active_lightbar_rgb: active_lb_preview,
             product_id: info.product_id,
             mac_address,
             firmware_version,
@@ -970,6 +1181,31 @@ fn session_loop(
     telemetry.write(final_snap);
     topology_version.fetch_add(1, Ordering::Release);
     info!(path = %info.device_path, "Controller session stopped");
+}
+
+fn maybe_idle_disconnect_bt(
+    transport: Transport,
+    mac_address: [u8; 6],
+    bt_idle_disconnect_mins: &AtomicU16,
+    last_activity: Instant,
+    now: Instant,
+    last_attempt: &mut Option<Instant>,
+) {
+    if transport != Transport::Bluetooth || mac_address == [0; 6] {
+        return;
+    }
+    let mins = bt_idle_disconnect_mins.load(Ordering::Acquire);
+    if mins == 0 {
+        return;
+    }
+    let idle_secs = now.saturating_duration_since(last_activity).as_secs();
+    if idle_secs >= (mins as u64) * 60
+        && last_attempt.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(10))
+    {
+        *last_attempt = Some(now);
+        info!(idle_mins = mins, "Bluetooth controller idle timeout reached; disconnecting");
+        let _ = crate::hid::disconnect_bluetooth_device(mac_address);
+    }
 }
 
 fn sync_virtual_audio(
@@ -1122,20 +1358,35 @@ fn hue_to_rgb(hue_deg: f32) -> [u8; 3] {
     [r.round() as u8, g.round() as u8, b.round() as u8]
 }
 
-pub fn compute_animated_lightbar(
+/// Perceptual gamma used to convert sRGB display colors + brightness into linear DualSense LED PWM duty cycles.
+const LED_GAMMA: f32 = 2.4;
+
+/// Computes both `(hardware_pwm_rgb, preview_srgb)` for the DualSense lightbar.
+///
+/// DualSense RGB LEDs are driven by linear PWM, whereas UI colors are in sRGB space.
+/// Converting each channel via `((c / 255.0) * brightness).powf(2.4)` prevents minor
+/// secondary channels from washing reds into pink or greens into pastel mint, while
+/// keeping on-screen preview colors accurate in sRGB.
+pub fn compute_lightbar_colors(
     prof: &ControllerProfile,
     elapsed_secs: f32,
     battery_pct: u8,
     battery_status: BatteryStatus,
     max_trigger: u8,
     idle_secs: u32,
-) -> [u8; 3] {
+) -> ([u8; 3], [u8; 3]) {
     let bright = prof.lightbar_brightness.clamp(0.0, 1.0);
     let speed = prof.lightbar_speed.clamp(0.25, 3.0);
 
     if is_low_battery_alert(prof, battery_pct, battery_status) {
         let pulse = 0.25 + 0.75 * (0.5 + 0.5 * (elapsed_secs * 6.0).sin());
-        return [(240.0 * pulse).round() as u8, 12, 12];
+        let preview = [(255.0 * pulse).round().clamp(0.0, 255.0) as u8, 0, 0];
+        let hw = [
+            (pulse.powf(LED_GAMMA) * 255.0).round().clamp(1.0, 255.0) as u8,
+            0,
+            0,
+        ];
+        return (hw, preview);
     }
 
     let base = match prof.lightbar_mode {
@@ -1151,11 +1402,11 @@ pub fn compute_animated_lightbar(
         LightbarMode::Rainbow => hue_to_rgb(elapsed_secs * speed * 90.0),
         LightbarMode::BatteryIndicator => {
             if battery_status == BatteryStatus::Full || battery_pct >= 75 {
-                [32, 210, 96]
+                [0, 224, 48]
             } else if battery_pct >= 40 {
-                [235, 175, 42]
+                [255, 196, 0]
             } else {
-                [235, 56, 56]
+                [255, 0, 0]
             }
         }
         LightbarMode::TriggerReactive => {
@@ -1170,31 +1421,58 @@ pub fn compute_animated_lightbar(
         }
     };
 
-    let idle_factor = if prof.idle_dim_secs > 0 && idle_secs >= prof.idle_dim_secs as u32 {
+    let idle_factor: f32 = if prof.idle_dim_secs > 0 && idle_secs >= prof.idle_dim_secs as u32 {
         0.15
     } else {
         1.0
     };
-    // Human brightness perception on linear PWM LEDs follows a ~2.4 gamma curve;
-    // linear scaling barely dims until <15%, then drops abruptly to off.
-    let scale = bright.powf(2.4) * idle_factor;
-    if scale <= 0.0 || base == [0, 0, 0] {
-        return [0, 0, 0];
+    if bright <= 0.0 || base == [0, 0, 0] {
+        return ([0, 0, 0], [0, 0, 0]);
     }
-    let mut out = [
-        ((base[0] as f32) * scale).round().clamp(0.0, 255.0) as u8,
-        ((base[1] as f32) * scale).round().clamp(0.0, 255.0) as u8,
-        ((base[2] as f32) * scale).round().clamp(0.0, 255.0) as u8,
+
+    let preview_scale = bright * idle_factor.powf(1.0 / LED_GAMMA);
+    let preview = [
+        ((base[0] as f32) * preview_scale).round().clamp(0.0, 255.0) as u8,
+        ((base[1] as f32) * preview_scale).round().clamp(0.0, 255.0) as u8,
+        ((base[2] as f32) * preview_scale).round().clamp(0.0, 255.0) as u8,
     ];
-    if out == [0, 0, 0] {
+
+    let mut hw = [0u8; 3];
+    for i in 0..3 {
+        let norm = (base[i] as f32 / 255.0) * bright;
+        hw[i] = (norm.powf(LED_GAMMA) * idle_factor * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+    }
+    if hw == [0, 0, 0] {
         let max_ch = base[0].max(base[1]).max(base[2]);
         for i in 0..3 {
             if base[i] == max_ch {
-                out[i] = 1;
+                hw[i] = 1;
             }
         }
     }
-    out
+    (hw, preview)
+}
+
+#[cfg(test)]
+pub fn compute_animated_lightbar(
+    prof: &ControllerProfile,
+    elapsed_secs: f32,
+    battery_pct: u8,
+    battery_status: BatteryStatus,
+    max_trigger: u8,
+    idle_secs: u32,
+) -> [u8; 3] {
+    compute_lightbar_colors(
+        prof,
+        elapsed_secs,
+        battery_pct,
+        battery_status,
+        max_trigger,
+        idle_secs,
+    )
+    .0
 }
 
 #[cfg(test)]
@@ -1213,10 +1491,32 @@ mod tests {
             idle_dim_secs: 60,
             ..Default::default()
         };
-        // 50% perceptual brightness (~0.5^2.4 = 0.1895 PWM) dims noticeably on hardware LEDs
-        let half = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
-        assert_eq!(half, [19, 38, 9]);
+        // Per-channel sRGB-to-linear gamma (~2.4) dims perceptually AND keeps hues saturated
+        let (half_hw, half_preview) =
+            compute_lightbar_colors(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
+        assert_eq!(half_hw, [5, 27, 1]);
+        assert_eq!(half_preview, [50, 100, 25]);
+
+        // Desaturated sRGB red (#EB3838) must suppress linear green/blue bleed so LED stays red, not pink
+        prof.lightbar_rgb = [235, 56, 56];
+        prof.lightbar_brightness = 1.0;
+        let crimson_hw = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
+        assert_eq!(crimson_hw, [210, 7, 7]);
+
+        // Pure primaries stay full scale at 100% brightness
+        prof.lightbar_rgb = [255, 0, 0];
+        assert_eq!(
+            compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0),
+            [255, 0, 0]
+        );
+        prof.lightbar_rgb = [0, 255, 0];
+        assert_eq!(
+            compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0),
+            [0, 255, 0]
+        );
+
         // Low non-zero brightness stays dimly lit instead of snapping to black
+        prof.lightbar_rgb = [100, 200, 50];
         prof.lightbar_brightness = 0.05;
         let dim = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
         assert_eq!(dim, [0, 1, 0]);
@@ -1225,26 +1525,24 @@ mod tests {
             compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0),
             [0, 0, 0]
         );
-        // Idle dim scales further by 0.15
+        // Idle dim scales hardware PWM further by 0.15
         prof.lightbar_brightness = 0.5;
         assert_eq!(
             compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 65),
-            [3, 6, 1]
+            [1, 4, 0]
         );
-        // Low battery alert overrides to pulsing red
+        // Low battery alert overrides to pure pulsing red
         let lb = compute_animated_lightbar(&prof, 0.25, 15, BatteryStatus::Discharging, 0, 0);
-        assert!(lb[0] > lb[1] && lb[0] > lb[2]);
+        assert!(lb[0] > 0 && lb[1] == 0 && lb[2] == 0);
         // Rainbow progresses hues
         prof.lightbar_mode = LightbarMode::Rainbow;
         prof.lightbar_brightness = 1.0;
         let r0 = compute_animated_lightbar(&prof, 0.0, 80, BatteryStatus::Discharging, 0, 0);
         let r1 = compute_animated_lightbar(&prof, 1.5, 80, BatteryStatus::Discharging, 0, 0);
         assert_ne!(r0, r1);
-        // Battery indicator turns green when >=75%
+        // Battery indicator turns vivid green when >=75%
         prof.lightbar_mode = LightbarMode::BatteryIndicator;
-        assert_eq!(
-            compute_animated_lightbar(&prof, 0.0, 90, BatteryStatus::Discharging, 0, 0),
-            [32, 210, 96]
-        );
+        let batt_hw = compute_animated_lightbar(&prof, 0.0, 90, BatteryStatus::Discharging, 0, 0);
+        assert_eq!(batt_hw, [0, 187, 5]);
     }
 }

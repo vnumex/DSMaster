@@ -5,7 +5,7 @@
 ;   iscc /DAppVersion=0.2.1 /DAppTag=v0.2.1 /DExePath=D:\DSMaster\target\release\dsmaster.exe /DOutputDir=D:\DSMaster\dist installer\dsmaster.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.3.1"
 #endif
 #ifndef AppTag
   #define AppTag "v" + AppVersion

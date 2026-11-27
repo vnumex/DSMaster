@@ -190,6 +190,9 @@ pub struct OutputState {
     /// One-time `DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT` (`valid_flag2 |= 0x02`, `lightbar_setup = 0x02`)
     /// to clear the controller's default startup blue pulse before sending RGB updates.
     pub reset_lightbar: bool,
+    /// `DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_ON` (`valid_flag2 |= 0x02`, `lightbar_setup = 0x01`)
+    /// to restore the controller's native PlayStation blue glow when returning to passthrough.
+    pub fade_lightbar_blue: bool,
     pub update_lightbar: bool,
     pub lightbar_rgb: [u8; 3],
     pub update_player_leds: bool,
@@ -221,6 +224,7 @@ impl Default for OutputState {
             update_mic_mute_led: false,
             mic_mute_led: MicMuteLed::Off,
             reset_lightbar: false,
+            fade_lightbar_blue: false,
             update_lightbar: false,
             lightbar_rgb: [0, 0, 64],
             update_player_leds: false,
@@ -289,7 +293,10 @@ fn write_common_payload(state: &OutputState, c: &mut [u8]) {
         c[8] = state.mic_mute_led as u8;
     }
 
-    if state.reset_lightbar {
+    if state.fade_lightbar_blue {
+        flag2 |= 0x02;
+        c[41] = 0x01;
+    } else if state.reset_lightbar {
         flag2 |= 0x02;
         c[41] = 0x02;
     }
@@ -744,5 +751,14 @@ mod tests {
         assert_eq!(bt[4] & 0x04, 0x00);
         assert_eq!(bt[41] & 0x02, 0x02);
         assert_eq!(bt[44], 0x02);
+
+        let restore = OutputState {
+            fade_lightbar_blue: true,
+            ..Default::default()
+        };
+        encode_output_report(&restore, Transport::Bluetooth, 3, &mut bt).unwrap();
+        assert_eq!(bt[4] & 0x04, 0x00);
+        assert_eq!(bt[41] & 0x02, 0x02);
+        assert_eq!(bt[44], 0x01);
     }
 }

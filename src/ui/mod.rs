@@ -5,6 +5,7 @@ pub mod theme;
 mod widgets;
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -131,11 +132,11 @@ const RGB_SWATCHES: [(&str, [u8; 3]); 8] = [
     ("Off", [0, 0, 0]),
     ("Cobalt", [0, 102, 255]),
     ("Ice", [210, 224, 240]),
-    ("Cyan", [0, 196, 220]),
-    ("Emerald", [32, 200, 96]),
-    ("Gold", [242, 208, 107]),
-    ("Crimson", [235, 56, 56]),
-    ("Violet", [148, 86, 245]),
+    ("Cyan", [0, 212, 255]),
+    ("Emerald", [0, 224, 48]),
+    ("Gold", [255, 196, 0]),
+    ("Crimson", [255, 0, 0]),
+    ("Violet", [148, 0, 255]),
 ];
 
 const PLAYER_LED_OPTIONS: [(&str, u8); 5] = [
@@ -243,6 +244,12 @@ fn fmt_hms(secs: u32) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct KnownSessionInfo {
+    is_edge: bool,
+    transport: Transport,
+}
+
 pub struct DsMasterView {
     engine: Option<Engine>,
     engine_error: Option<String>,
@@ -269,6 +276,8 @@ pub struct DsMasterView {
     handles: Vec<Arc<SeqLock<TelemetrySnapshot>>>,
     selected_idx: usize,
     snapshots: Vec<TelemetrySnapshot>,
+    known_sessions: HashMap<u64, KnownSessionInfo>,
+    low_battery_notified: HashSet<u64>,
     window_ctl: WindowControlState,
     run_at_startup: bool,
     tray_tx: crossbeam_channel::Sender<TrayAction>,
@@ -337,6 +346,8 @@ impl DsMasterView {
             handles: Vec::new(),
             selected_idx: 0,
             snapshots: Vec::new(),
+            known_sessions: HashMap::new(),
+            low_battery_notified: HashSet::new(),
             window_ctl,
             run_at_startup,
             tray_tx,
@@ -353,6 +364,7 @@ impl DsMasterView {
         };
         this.sync_from_engine();
         this.read_snapshots();
+        this.seed_known_sessions();
         this.sync_tray_state();
 
         this._watch_task = cx.spawn(async move |weak_this, cx| {
@@ -366,15 +378,21 @@ impl DsMasterView {
                     let update_check_changed = view.poll_update_check();
                     let update_install_changed = view.poll_update_install(cx);
                     let notice_expired = view.expire_status_notice();
-                    if eng_changed {
+                    if eng_changed || !view.handles.is_empty() {
                         view.read_snapshots();
+                    }
+                    view.check_notifications();
+                    if eng_changed {
                         view.sync_tray_state();
                     }
+                    let integrations_live = view.page == ActivePage::Settings
+                        && (view.config.dsu_enabled || view.config.dsx_udp_enabled);
                     if eng_changed
                         || install_changed
                         || update_check_changed
                         || update_install_changed
                         || notice_expired
+                        || integrations_live
                     {
                         cx.notify();
                     }
@@ -445,6 +463,125 @@ impl DsMasterView {
         self.snapshots.clear();
         for handle in &self.handles {
             self.snapshots.push(handle.read());
+        }
+    }
+
+    fn seed_known_sessions(&mut self) {
+        self.known_sessions.clear();
+        for snap in &self.snapshots {
+            if snap.session_id != 0 {
+                self.known_sessions.insert(
+                    snap.session_id,
+                    KnownSessionInfo {
+                        is_edge: snap.is_edge,
+                        transport: snap.transport,
+                    },
+                );
+            }
+        }
+    }
+
+    fn check_notifications(&mut self) {
+        let mut current: HashMap<u64, &TelemetrySnapshot> = HashMap::new();
+        for snap in &self.snapshots {
+            if snap.session_id != 0 {
+                current.insert(snap.session_id, snap);
+            }
+        }
+
+        let notify_all = self.config.notifications_enabled;
+        let notify_conn = notify_all && self.config.notify_connect_disconnect;
+        let notify_low = notify_all && self.config.notify_low_battery;
+
+        // Detect newly connected controllers.
+        for (&sid, snap) in &current {
+            if !self.known_sessions.contains_key(&sid) {
+                self.known_sessions.insert(
+                    sid,
+                    KnownSessionInfo {
+                        is_edge: snap.is_edge,
+                        transport: snap.transport,
+                    },
+                );
+                if notify_conn {
+                    if let Some(tray) = &self.tray {
+                        let model = if snap.is_edge {
+                            "DualSense Edge"
+                        } else {
+                            "DualSense"
+                        };
+                        let tr = match snap.transport {
+                            Transport::Usb => "USB",
+                            Transport::Bluetooth => "Bluetooth",
+                        };
+                        let body = if snap.battery_status != BatteryStatus::Unknown {
+                            format!("{tr} · Battery {}%", snap.battery_percent)
+                        } else {
+                            tr.to_owned()
+                        };
+                        tray.show_notification(format!("{model} Connected"), body, false);
+                    }
+                }
+            }
+        }
+
+        // Detect disconnected controllers.
+        let removed: Vec<(u64, KnownSessionInfo)> = self
+            .known_sessions
+            .iter()
+            .filter(|(sid, _)| !current.contains_key(sid))
+            .map(|(&sid, &info)| (sid, info))
+            .collect();
+        for (sid, info) in removed {
+            self.known_sessions.remove(&sid);
+            self.low_battery_notified.remove(&sid);
+            if notify_conn {
+                if let Some(tray) = &self.tray {
+                    let model = if info.is_edge {
+                        "DualSense Edge"
+                    } else {
+                        "DualSense"
+                    };
+                    let tr = match info.transport {
+                        Transport::Usb => "USB",
+                        Transport::Bluetooth => "Bluetooth",
+                    };
+                    tray.show_notification(format!("{model} Disconnected"), tr, false);
+                }
+            }
+        }
+
+        // Detect low battery transitions with 5% hysteresis.
+        let threshold = self
+            .config
+            .active_settings()
+            .low_battery_threshold
+            .clamp(5, 50);
+        for (&sid, snap) in &current {
+            let is_low = snap.battery_status == BatteryStatus::Discharging
+                && snap.battery_percent > 0
+                && snap.battery_percent <= threshold;
+            let recovered = snap.battery_status != BatteryStatus::Discharging
+                || snap.battery_percent > threshold.saturating_add(5);
+            if recovered {
+                self.low_battery_notified.remove(&sid);
+            } else if is_low && !self.low_battery_notified.contains(&sid) {
+                self.low_battery_notified.insert(sid);
+                if notify_low {
+                    if let Some(tray) = &self.tray {
+                        let model = if snap.is_edge {
+                            "DualSense Edge"
+                        } else {
+                            "DualSense"
+                        };
+                        tray.show_notification(
+                            format!("{model} Low Battery ({}%)", snap.battery_percent),
+                            "Connect USB to charge your controller",
+                            true,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1122,14 +1259,21 @@ impl DsMasterView {
             }
             ActiveSlider::HueBar => {
                 let h = (t * 360.0).clamp(0.0, 359.99);
-                let mut sat = self.picker_hsv.1;
-                let mut val = self.picker_hsv.2;
-                if sat < 0.08 {
-                    sat = 0.90;
-                }
-                if val < 0.12 {
-                    val = 1.0;
-                }
+                let (sat, val) = if self.page == ActivePage::Lighting {
+                    let s = if self.picker_hsv.1 < 0.20 {
+                        1.0
+                    } else {
+                        self.picker_hsv.1
+                    };
+                    let v = if self.picker_hsv.2 < 0.15 {
+                        1.0
+                    } else {
+                        self.picker_hsv.2
+                    };
+                    (s, v)
+                } else {
+                    (1.0, 1.0)
+                };
                 self.picker_hsv = (h, sat, val);
                 let s = self.config.active_settings_mut();
                 s.set_custom_lightbar_rgb(hsv_to_rgb(h, sat, val));
@@ -1444,7 +1588,7 @@ impl DsMasterView {
                         .window_control_area(WindowControlArea::Close)
                         .cursor_pointer()
                         .hover(|s| s.bg(color(CLOSE_HOVER)))
-                        .child(win_close_icon(TEXT)),
+                        .child(win_close_icon(TEXT_SECONDARY)),
                 ),
         )
     }
@@ -6688,6 +6832,272 @@ impl DsMasterView {
             );
         }
 
+        let notif_on = self.config.notifications_enabled;
+        let notif_conn_on = self.config.notify_connect_disconnect;
+        let notif_low_on = self.config.notify_low_battery;
+        let bt_idle_mins = self.config.bt_idle_disconnect_mins;
+        let selected_bt_mac = self
+            .selected_snapshot()
+            .filter(|s| s.transport == Transport::Bluetooth && s.mac_address != [0; 6])
+            .map(|s| s.mac_address);
+
+        let mut bt_idle_pills = div().flex().flex_wrap().gap_2();
+        for (mins, label) in [
+            (0u16, "Off"),
+            (5u16, "5m"),
+            (10u16, "10m"),
+            (15u16, "15m"),
+            (20u16, "20m"),
+            (30u16, "30m"),
+        ] {
+            let active = bt_idle_mins == mins;
+            bt_idle_pills = bt_idle_pills.child(
+                pill_button(
+                    SharedString::from(format!("set-bt-idle-{mins}")),
+                    label,
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.bt_idle_disconnect_mins = mins;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let mut power_notif_card = section_card("Notifications & Bluetooth power")
+            .flex_1()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(setting_row(
+                        "Desktop notifications",
+                        "Show native Windows notifications from the system tray",
+                        toggle_switch("set-notif-all-sw", notif_on).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.config.notifications_enabled =
+                                    !this.config.notifications_enabled;
+                                this.commit_config(cx);
+                            },
+                        )),
+                    ))
+                    .child(setting_row(
+                        "Connect & disconnect alerts",
+                        "Notify when a DualSense connects or disconnects",
+                        toggle_switch("set-notif-conn-sw", notif_on && notif_conn_on).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.config.notify_connect_disconnect =
+                                    !this.config.notify_connect_disconnect;
+                                if this.config.notify_connect_disconnect {
+                                    this.config.notifications_enabled = true;
+                                }
+                                this.commit_config(cx);
+                            }),
+                        ),
+                    ))
+                    .child(setting_row(
+                        "Low battery alerts",
+                        "Warn when battery drops to your low-battery threshold",
+                        toggle_switch("set-notif-low-sw", notif_on && notif_low_on).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.config.notify_low_battery = !this.config.notify_low_battery;
+                                if this.config.notify_low_battery {
+                                    this.config.notifications_enabled = true;
+                                }
+                                this.commit_config(cx);
+                            }),
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(color(BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(color(TEXT))
+                                            .child("Bluetooth auto-disconnect"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(color(TEXT_MUTED))
+                                            .child(
+                                                "Drop Bluetooth after inactivity so the controller powers off",
+                                            ),
+                                    ),
+                            )
+                            .child(bt_idle_pills),
+                    ),
+            );
+
+        if let Some(mac) = selected_bt_mac {
+            power_notif_card = power_notif_card.child(
+                div()
+                    .mt_auto()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(status_info_pill("Disconnect active Bluetooth controller now"))
+                    .child(
+                        subtle_button("set-bt-disc-now", "Disconnect BT").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                if let Some(engine) = &this.engine {
+                                    match engine.disconnect_bluetooth_mac(mac) {
+                                        Ok(()) => this.set_status_notice(
+                                            "Bluetooth controller disconnected",
+                                            Some(NOTICE_TTL),
+                                        ),
+                                        Err(e) => this.set_status_notice(
+                                            format!("Bluetooth disconnect failed: {e}"),
+                                            Some(NOTICE_ERROR_TTL),
+                                        ),
+                                    }
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                    ),
+            );
+        }
+
+        let dsu_on = self.config.dsu_enabled;
+        let dsx_on = self.config.dsx_udp_enabled;
+        let dsu_status = self
+            .engine
+            .as_ref()
+            .map(Engine::dsu_status)
+            .unwrap_or_default();
+        let dsx_status = self
+            .engine
+            .as_ref()
+            .map(Engine::dsx_udp_status)
+            .unwrap_or_default();
+
+        let dsu_status_text = if !dsu_on {
+            "Off".to_owned()
+        } else if let Some(err) = dsu_status.last_error.as_ref() {
+            err.clone()
+        } else if dsu_status.running {
+            format!(
+                "Listening 127.0.0.1:{} · {} client{}",
+                dsu_status.port,
+                dsu_status.subscriber_count,
+                if dsu_status.subscriber_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        } else {
+            format!("Starting on :{}", self.config.dsu_port)
+        };
+
+        let dsx_status_text = if !dsx_on {
+            "Off".to_owned()
+        } else if let Some(err) = dsx_status.last_error.as_ref() {
+            err.clone()
+        } else if dsx_status.running {
+            let state_label = if dsx_status.override_active {
+                "Mod override active"
+            } else {
+                "Waiting for mods"
+            };
+            format!(
+                "Listening 127.0.0.1:{} · {state_label} ({} pkts)",
+                dsx_status.port, dsx_status.packets_received
+            )
+        } else {
+            format!("Starting on :{}", self.config.dsx_udp_port)
+        };
+
+        let mut integrations_card = section_card("Integrations (CemuHook & DSX Mods)")
+            .flex_1()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(setting_row(
+                        "CemuHook / DSU server",
+                        "Stream calibrated gyro, accel & touchpad to emulators (Cemu, Dolphin, Ryujinx, RPCS3)",
+                        toggle_switch("set-dsu-sw", dsu_on).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.config.dsu_enabled = !this.config.dsu_enabled;
+                                this.commit_config(cx);
+                            },
+                        )),
+                    ))
+                    .child(if dsu_on && dsu_status.running && dsu_status.last_error.is_none() {
+                        status_inset_pill(dsu_status_text, true)
+                    } else {
+                        status_info_pill(dsu_status_text)
+                    })
+                    .child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(color(BORDER))
+                            .child(setting_row(
+                                "DSX UDP mod server",
+                                "Listen on DSX's UDP port (6969) so game mods can drive adaptive triggers & LEDs",
+                                toggle_switch("set-dsx-udp-sw", dsx_on).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.config.dsx_udp_enabled = !this.config.dsx_udp_enabled;
+                                        this.commit_config(cx);
+                                    },
+                                )),
+                            )),
+                    )
+                    .child(if dsx_on && dsx_status.running && dsx_status.last_error.is_none() {
+                        status_inset_pill(dsx_status_text, true)
+                    } else {
+                        status_info_pill(dsx_status_text)
+                    }),
+            );
+
+        if dsx_on && dsx_status.override_active {
+            integrations_card = integrations_card.child(
+                div()
+                    .mt_auto()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        subtle_button("set-dsx-reset", "Reset mod override").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                if let Some(engine) = &this.engine {
+                                    engine.clear_dsx_override();
+                                }
+                                this.set_status_notice(
+                                    "Cleared DSX mod override",
+                                    Some(NOTICE_TTL),
+                                );
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+        }
+
         div()
             .flex()
             .flex_col()
@@ -6709,11 +7119,18 @@ impl DsMasterView {
                             .text_sm()
                             .text_color(color(TEXT_MUTED))
                             .child(
-                                "Application startup, updates, required system drivers, and local configuration",
+                                "Application startup, notifications, integrations, system drivers, and local configuration",
                             ),
                     ),
             )
             .child(div().flex().gap_4().child(startup_card).child(drivers_card))
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(power_notif_card)
+                    .child(integrations_card),
+            )
             .child(updates_card)
             .child(config_card)
     }
