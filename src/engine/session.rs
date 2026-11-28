@@ -339,7 +339,10 @@ fn session_loop(
     );
 
     while !stop_flag.load(Ordering::Acquire) {
-        let read_timeout = if turbo_state.is_active() || keyboard.has_pending_macro() {
+        let read_timeout = if turbo_state.is_active()
+            || keyboard.has_pending_macro()
+            || active_test_rumble.is_some()
+        {
             10
         } else {
             250
@@ -565,14 +568,19 @@ fn session_loop(
                     last_bt_audio_hw = Some(bt_hw_key);
                 }
 
-                let (desired_large, desired_small) = if bt_hap_active {
-                    (0, 0)
-                } else if let Some((_, tl, ts)) = active_test_rumble {
+                let bt_hap_streaming_now = bt_audio_worker
+                    .as_ref()
+                    .is_some_and(|w| w.telemetry.haptics_streaming.load(Ordering::Acquire));
+                let suppress_rumble_for_haptics = bt_hap_active && bt_hap_streaming_now;
+
+                let (desired_large, desired_small) = if let Some((_, tl, ts)) = active_test_rumble {
                     let scale = prof.rumble_strength.clamp(0.15, 1.0);
                     (
                         ((tl as f32) * scale).round().clamp(0.0, 255.0) as u8,
                         ((ts as f32) * scale).round().clamp(0.0, 255.0) as u8,
                     )
+                } else if suppress_rumble_for_haptics {
+                    (0, 0)
                 } else if prof.enable_rumble {
                     let scale = prof.rumble_strength.clamp(0.0, 1.0);
                     (
@@ -586,9 +594,9 @@ fn session_loop(
                 if desired_large != rumble_large || desired_small != rumble_small {
                     rumble_large = desired_large;
                     rumble_small = desired_small;
-                    dirty_rumble = !bt_hap_active;
+                    dirty_rumble = active_test_rumble.is_some() || !suppress_rumble_for_haptics;
                 }
-                if bt_hap_active {
+                if suppress_rumble_for_haptics && active_test_rumble.is_none() {
                     dirty_rumble = false;
                 }
 
@@ -918,7 +926,8 @@ fn session_loop(
                         flush_output(
                             &mut device,
                             &OutputState {
-                                update_rumble: dirty_rumble && !bt_hap_active,
+                                update_rumble: dirty_rumble
+                                    && (active_test_rumble.is_some() || !suppress_rumble_for_haptics),
                                 motor_left: rumble_large,
                                 motor_right: rumble_small,
                                 update_headphone_volume: dirty_bt_audio,
@@ -1027,21 +1036,37 @@ fn session_loop(
                         active_test_rumble = None;
                     }
                 }
-                if active_test_rumble.is_none() && game_rumble_large == 0 && game_rumble_small == 0 && (rumble_large != 0 || rumble_small != 0) {
-                    rumble_large = 0;
-                    rumble_small = 0;
+                let prof = profile_swap.load();
+                let (desired_timeout_large, desired_timeout_small) =
+                    if let Some((_, tl, ts)) = active_test_rumble {
+                        let scale = prof.rumble_strength.clamp(0.15, 1.0);
+                        (
+                            ((tl as f32) * scale).round().clamp(0.0, 255.0) as u8,
+                            ((ts as f32) * scale).round().clamp(0.0, 255.0) as u8,
+                        )
+                    } else if game_rumble_large == 0 && game_rumble_small == 0 {
+                        (0, 0)
+                    } else {
+                        (rumble_large, rumble_small)
+                    };
+                if desired_timeout_large != rumble_large || desired_timeout_small != rumble_small {
+                    rumble_large = desired_timeout_large;
+                    rumble_small = desired_timeout_small;
                     flush_output(
                         &mut device,
                         &OutputState {
                             update_rumble: true,
-                            motor_left: 0,
-                            motor_right: 0,
+                            motor_left: rumble_large,
+                            motor_right: rumble_small,
                             ..Default::default()
                         },
                         &mut bt_seq,
                     );
+                    let mut snap = telemetry.read();
+                    snap.rumble_large = rumble_large;
+                    snap.rumble_small = rumble_small;
+                    telemetry.write(snap);
                 }
-                let prof = profile_swap.load();
                 let bt_spk_test_active = bt_audio_worker
                     .as_ref()
                     .is_some_and(|w| w.telemetry.speaker_test_active.load(Ordering::Acquire));
