@@ -3688,28 +3688,7 @@ impl DsMasterView {
         let left_trig_tuning = profile.left_trigger_tuning();
         let right_trig_tuning = profile.right_trigger_tuning();
 
-        let travel_card = section_card_with_action(
-            "Trigger travel & thresholds",
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(color(TEXT_SECONDARY))
-                        .child("Link L2 & R2"),
-                )
-                .child(
-                    toggle_switch("tp-link-trig", profile.link_triggers).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let s = this.config.active_settings_mut();
-                            s.link_triggers = !s.link_triggers;
-                            this.commit_config(cx);
-                        },
-                    )),
-                ),
-        )
+        let travel_card = section_card("Trigger travel & thresholds")
         .child(
             div()
                 .flex()
@@ -3992,8 +3971,29 @@ impl DsMasterView {
             cx,
         );
 
-        let mut tuning_card = section_card("Hair trigger & rumble motors")
-            .flex_1()
+        let mut tuning_card = section_card_with_action(
+            "Hair trigger & rumble motors",
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(color(TEXT_SECONDARY))
+                        .child("Link L2 & R2"),
+                )
+                .child(
+                    toggle_switch("tp-link-trig", profile.link_triggers).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let s = this.config.active_settings_mut();
+                            s.link_triggers = !s.link_triggers;
+                            this.commit_config(cx);
+                        },
+                    )),
+                ),
+        )
+        .flex_1()
             .child(trig_dz_row)
             .child(
                 div()
