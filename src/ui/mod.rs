@@ -6030,29 +6030,9 @@ impl DsMasterView {
                     .bg(color(WARN_SURFACE))
                     .border_1()
                     .border_color(color(WARN_BORDER))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(color(WARN))
-                            .child(warn_msg),
-                    )
-                    .child(
-                        subtle_button("mr-fs-fix-gyro", "Set Gyro → Mouse").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                let s = this.config.active_settings_mut();
-                                s.gyro_output = GyroOutputMode::Mouse;
-                                if s.gyro_mode == GyroAimMode::Off {
-                                    s.gyro_mode = GyroAimMode::AlwaysOn;
-                                }
-                                this.commit_config(cx);
-                            }),
-                        ),
-                    ),
+                    .text_xs()
+                    .text_color(color(WARN))
+                    .child(warn_msg),
             );
         }
 
