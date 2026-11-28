@@ -7297,7 +7297,7 @@ impl DsMasterView {
                 ))
                 .child(setting_row(
                     "Installed version",
-                    "Source: GitHub Releases (vnumex/DSMaster)",
+                    "Source: GitHub Releases (tassak-dozu/DSMaster)",
                     version_badges,
                 )),
         );

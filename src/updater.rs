@@ -1,4 +1,4 @@
-//! GitHub Releases auto-updater for DSMaster (`vnumex/DSMaster`).
+//! GitHub Releases auto-updater for DSMaster (`tassak-dozu/DSMaster`).
 //!
 //! Uses Windows' built-in `curl.exe` and `tar.exe` plus an in-Rust FIPS 180-4
 //! SHA-256 verifier against `SHA256SUMS.txt` so no extra HTTP/JSON/ZIP crates
@@ -23,9 +23,9 @@ use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecute
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 use windows::core::PCWSTR;
 
-const API_LATEST_URL: &str = "https://api.github.com/repos/vnumex/DSMaster/releases/latest";
-const ALLOWED_DOWNLOAD_PREFIX: &str = "https://github.com/vnumex/DSMaster/releases/download/";
-const ALLOWED_RELEASE_PREFIX: &str = "https://github.com/vnumex/DSMaster/releases/";
+const API_LATEST_URL: &str = "https://api.github.com/repos/tassak-dozu/DSMaster/releases/latest";
+const ALLOWED_DOWNLOAD_PREFIX: &str = "https://github.com/tassak-dozu/DSMaster/releases/download/";
+const ALLOWED_RELEASE_PREFIX: &str = "https://github.com/tassak-dozu/DSMaster/releases/";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn parses_valid_github_release_json() {
         let json = r#"{
-            "html_url": "https://github.com/vnumex/DSMaster/releases/tag/v0.3.0",
+            "html_url": "https://github.com/tassak-dozu/DSMaster/releases/tag/v0.3.0",
             "tag_name": "v0.3.0",
             "draft": false,
             "prerelease": false,
@@ -1018,11 +1018,11 @@ mod tests {
             "assets": [
                 {
                     "name": "DSMaster-v0.3.0-windows-x64.zip",
-                    "browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"
+                    "browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"
                 },
                 {
                     "name": "SHA256SUMS.txt",
-                    "browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"
+                    "browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"
                 }
             ]
         }"#;
@@ -1041,8 +1041,8 @@ mod tests {
             "draft": false,
             "prerelease": true,
             "assets": [
-                {"browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"},
-                {"browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"}
+                {"browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"},
+                {"browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"}
             ]
         }"#;
         assert!(parse_release_json(pre).is_err());
@@ -1053,7 +1053,7 @@ mod tests {
             "prerelease": false,
             "assets": [
                 {"browser_download_url": "https://evil.example.com/DSMaster-v0.3.0-windows-x64.zip"},
-                {"browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"}
+                {"browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/SHA256SUMS.txt"}
             ]
         }"#;
         assert!(parse_release_json(evil).is_err());
@@ -1063,7 +1063,7 @@ mod tests {
             "draft": false,
             "prerelease": false,
             "assets": [
-                {"browser_download_url": "https://github.com/vnumex/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"}
+                {"browser_download_url": "https://github.com/tassak-dozu/DSMaster/releases/download/v0.3.0/DSMaster-v0.3.0-windows-x64.zip"}
             ]
         }"#;
         assert!(parse_release_json(no_sums).is_err());
