@@ -104,14 +104,15 @@ pub enum TrayAction {
     Quit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayState {
     pub window_visible: bool,
     pub emulation: EmulationMode,
     pub cloak_enabled: bool,
     pub hidhide_available: bool,
     pub connected_count: usize,
-    pub active_profile: String,
+    pub battery_percent: Option<u8>,
+    pub battery_charging: bool,
 }
 
 impl TrayState {
@@ -122,14 +123,21 @@ impl TrayState {
             EmulationMode::DualShock4 => "DualShock 4",
             EmulationMode::DualSense => "DualSense",
         };
+        let batt_seg = self.battery_percent.map(|pct| {
+            if self.battery_charging {
+                format!(" · {pct}% Charging")
+            } else {
+                format!(" · {pct}%")
+            }
+        }).unwrap_or_default();
         let raw = if self.connected_count == 0 {
             format!("DSMaster - {mode} (Idle)")
         } else if self.connected_count == 1 {
-            format!("DSMaster - {mode} (1 connected, {})", self.active_profile)
+            format!("DSMaster - {mode}{batt_seg}")
         } else {
             format!(
-                "DSMaster - {mode} ({} connected, {})",
-                self.connected_count, self.active_profile
+                "DSMaster - {mode}{batt_seg} ({} connected)",
+                self.connected_count
             )
         };
         let mut out = String::new();
@@ -158,6 +166,7 @@ struct TrayWindowCtx {
     state: Arc<Mutex<TrayState>>,
     pending_notifications: Arc<Mutex<Vec<PendingNotification>>>,
     hicon: HICON,
+    icon_key: Option<(Option<u8>, bool)>,
     taskbar_created_msg: u32,
 }
 
@@ -296,7 +305,17 @@ fn run_tray_loop(
         }
     };
 
-    let Some(hicon) = create_tray_icon() else {
+    let initial_icon_key = {
+        let st = state.lock();
+        if st.connected_count == 0 {
+            (None, false)
+        } else {
+            (st.battery_percent, st.battery_charging)
+        }
+    };
+    let Some(hicon) = create_battery_tray_icon(initial_icon_key.0, initial_icon_key.1)
+        .or_else(create_tray_icon)
+    else {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
@@ -312,6 +331,7 @@ fn run_tray_loop(
         state: Arc::clone(&state),
         pending_notifications,
         hicon,
+        icon_key: Some(initial_icon_key),
         taskbar_created_msg,
     });
     let ctx_ptr = Box::into_raw(ctx_box);
@@ -352,7 +372,7 @@ unsafe extern "system" fn tray_wnd_proc(
 ) -> LRESULT {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut TrayWindowCtx;
     if !ptr.is_null() {
-        let ctx = unsafe { &*ptr };
+        let ctx = unsafe { &mut *ptr };
         match msg {
             WM_TRAY_ICON => {
                 let ev = (lparam.0 as u32) & 0xFFFF;
@@ -368,8 +388,29 @@ unsafe extern "system" fn tray_wnd_proc(
                 return LRESULT(0);
             }
             WM_TRAY_UPDATE_TIP => {
-                let tip = ctx.state.lock().tooltip();
+                let (tip, next_key) = {
+                    let st = ctx.state.lock();
+                    let key = if st.connected_count == 0 {
+                        (None, false)
+                    } else {
+                        (st.battery_percent, st.battery_charging)
+                    };
+                    (st.tooltip(), key)
+                };
+                let mut old_icon = None;
+                if ctx.icon_key != Some(next_key) {
+                    if let Some(new_icon) = create_battery_tray_icon(next_key.0, next_key.1) {
+                        old_icon = Some(ctx.hicon);
+                        ctx.hicon = new_icon;
+                        ctx.icon_key = Some(next_key);
+                    }
+                }
                 update_tray_tip(hwnd, ctx.hicon, &tip);
+                if let Some(prev) = old_icon {
+                    unsafe {
+                        let _ = DestroyIcon(prev);
+                    }
+                }
                 return LRESULT(0);
             }
             WM_TRAY_NOTIFY => {
@@ -717,6 +758,163 @@ fn create_tray_icon() -> Option<HICON> {
     load_app_icon(w, h, false)
 }
 
+/// Renders a crisp 32-bit BGRA Windows ICO DIB for a horizontal battery tray icon.
+///
+/// - `battery_percent = None` renders a muted outline (disconnected / idle).
+/// - `battery_percent = Some(pct)` fills proportionally with green (>40%), amber (21–40%),
+///   or red (<=20%), and overlays a white lightning bolt when `charging` is true.
+fn build_battery_ico_dib(
+    width: usize,
+    height: usize,
+    battery_percent: Option<u8>,
+    charging: bool,
+) -> Vec<u8> {
+    let w = width.clamp(16, 64);
+    let h = height.clamp(16, 64);
+    let xor_len = w * h * 4;
+    let and_stride = w.div_ceil(32) * 4;
+    let and_len = and_stride * h;
+    let mut buf = vec![0u8; 40 + xor_len + and_len];
+
+    // BITMAPINFOHEADER (40 bytes)
+    buf[0..4].copy_from_slice(&40u32.to_le_bytes());
+    buf[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+    buf[8..12].copy_from_slice(&((h * 2) as i32).to_le_bytes());
+    buf[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+    buf[14..16].copy_from_slice(&32u16.to_le_bytes()); // 32-bit BGRA
+    buf[20..24].copy_from_slice(&((xor_len + and_len) as u32).to_le_bytes());
+
+    let set_px = |buf: &mut [u8], x: usize, y: usize, r: u8, g: u8, b: u8, a: u8| {
+        if x >= w || y >= h {
+            return;
+        }
+        // Bottom-up row order for DIB
+        let dib_y = h - 1 - y;
+        let off = 40 + (dib_y * w + x) * 4;
+        buf[off] = b;
+        buf[off + 1] = g;
+        buf[off + 2] = r;
+        buf[off + 3] = a;
+    };
+
+    // Scale coordinates cleanly from a 16x16 logical grid
+    let sx = |v: f32| ((v / 16.0) * (w as f32)).round() as usize;
+    let sy = |v: f32| ((v / 16.0) * (h as f32)).round() as usize;
+
+    let x0 = sx(1.0);
+    let x1 = sx(13.0).min(w - 2);
+    let y0 = sy(4.0);
+    let y1 = sy(12.0).min(h - 1);
+    let border = (w / 16).max(1);
+
+    let (or, og, ob, oa) = if battery_percent.is_some() {
+        (235u8, 240u8, 248u8, 255u8)
+    } else {
+        (140u8, 148u8, 162u8, 210u8)
+    };
+
+    // Battery body outline (slightly rounded outer corners)
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let is_corner = (x == x0 || x == x1) && (y == y0 || y == y1);
+            if is_corner {
+                continue;
+            }
+            let on_edge = x < x0 + border
+                || x + border > x1
+                || y < y0 + border
+                || y + border > y1;
+            if on_edge {
+                set_px(&mut buf, x, y, or, og, ob, oa);
+            } else {
+                // Dark translucent interior for contrast on both light and dark taskbars
+                set_px(&mut buf, x, y, 20, 24, 30, 190);
+            }
+        }
+    }
+
+    // Positive battery terminal nub on the right
+    let nub_x0 = (x1 + 1).min(w - 1);
+    let nub_x1 = (x1 + border.max(1) + 1).min(w - 1);
+    let nub_y0 = sy(6.0);
+    let nub_y1 = sy(10.0).min(h - 1);
+    for y in nub_y0..=nub_y1 {
+        for x in nub_x0..=nub_x1 {
+            set_px(&mut buf, x, y, or, og, ob, oa);
+        }
+    }
+
+    // Fill level
+    if let Some(pct) = battery_percent {
+        let clamped = pct.min(100);
+        let pad = border + (w / 16).max(1);
+        let fx0 = x0 + pad;
+        let fx1 = x1.saturating_sub(pad);
+        let fy0 = y0 + pad;
+        let fy1 = y1.saturating_sub(pad);
+        if fx1 >= fx0 && fy1 >= fy0 {
+            let max_w = fx1 - fx0 + 1;
+            let fill_w = if clamped == 0 {
+                0
+            } else {
+                (((max_w as f32) * (clamped as f32) / 100.0).round() as usize).clamp(1, max_w)
+            };
+            let (fr, fg, fb) = if charging {
+                (52, 211, 153) // Emerald green
+            } else if clamped > 40 {
+                (74, 222, 128) // Crisp green
+            } else if clamped > 20 {
+                (251, 191, 36) // Warm amber
+            } else {
+                (248, 113, 113) // Alert red
+            };
+            for y in fy0..=fy1 {
+                for x in fx0..(fx0 + fill_w) {
+                    set_px(&mut buf, x, y, fr, fg, fb, 255);
+                }
+            }
+        }
+    }
+
+    // Charging lightning bolt overlay in center of the battery
+    if charging {
+        let cx = (x0 + x1) as f32 * 0.5;
+        let cy = (y0 + y1) as f32 * 0.5;
+        let scale = (h as f32) / 16.0;
+        let bolt_pts: [(f32, f32); 7] = [
+            (0.8, -3.5),
+            (-1.8, 0.2),
+            (0.2, 0.2),
+            (-0.8, 3.5),
+            (1.8, -0.2),
+            (-0.2, -0.2),
+            (0.0, 0.0),
+        ];
+        for &(bx, by) in &bolt_pts {
+            let px_x = (cx + bx * scale).round() as isize;
+            let px_y = (cy + by * scale).round() as isize;
+            for dy in 0..border.max(1) as isize {
+                for dx in 0..border.max(1) as isize {
+                    let tx = px_x + dx;
+                    let ty = px_y + dy;
+                    if tx >= 0 && ty >= 0 {
+                        set_px(&mut buf, tx as usize, ty as usize, 255, 255, 255, 255);
+                    }
+                }
+            }
+        }
+    }
+
+    buf
+}
+
+fn create_battery_tray_icon(battery_percent: Option<u8>, charging: bool) -> Option<HICON> {
+    let w = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64);
+    let h = unsafe { GetSystemMetrics(SM_CYSMICON) }.clamp(16, 64);
+    let dib = build_battery_ico_dib(w as usize, h as usize, battery_percent, charging);
+    unsafe { CreateIconFromResourceEx(&dib, true, 0x0003_0000, w, h, LR_DEFAULTCOLOR).ok() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,16 +927,32 @@ mod tests {
             cloak_enabled: true,
             hidhide_available: true,
             connected_count: 2,
-            active_profile: "A".repeat(200),
+            battery_percent: Some(65),
+            battery_charging: true,
         };
         let tip = state.tooltip();
         assert!(tip.encode_utf16().count() <= 127);
-        assert!(tip.starts_with("DSMaster - Xbox 360"));
+        assert_eq!(tip, "DSMaster - Xbox 360 · 65% Charging (2 connected)");
     }
 
     #[test]
     fn embedded_ico_selects_expected_frames() {
         assert!(select_ico_frame(APP_ICON_BYTES, 16, 16).is_some());
         assert!(select_ico_frame(APP_ICON_BYTES, 32, 32).is_some());
+    }
+
+    #[test]
+    fn battery_tray_dib_has_valid_header_and_pixels() {
+        let dib = build_battery_ico_dib(32, 32, Some(75), true);
+        let expected_len = 40 + (32 * 32 * 4) + (4 * 32);
+        assert_eq!(dib.len(), expected_len);
+        assert_eq!(u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]), 40);
+        assert_eq!(i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]), 32);
+        assert_eq!(i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]), 64);
+        let non_zero_alpha = dib[40..40 + 32 * 32 * 4]
+            .chunks_exact(4)
+            .filter(|px| px[3] > 0)
+            .count();
+        assert!(non_zero_alpha > 100);
     }
 }

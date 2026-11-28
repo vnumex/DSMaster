@@ -288,6 +288,7 @@ pub struct DsMasterView {
     snapshots: Vec<TelemetrySnapshot>,
     known_sessions: HashMap<u64, KnownSessionInfo>,
     low_battery_notified: HashSet<u64>,
+    last_tray_battery: Option<(u8, bool)>,
     window_ctl: WindowControlState,
     run_at_startup: bool,
     tray_tx: crossbeam_channel::Sender<TrayAction>,
@@ -360,6 +361,7 @@ impl DsMasterView {
             snapshots: Vec::new(),
             known_sessions: HashMap::new(),
             low_battery_notified: HashSet::new(),
+            last_tray_battery: None,
             window_ctl,
             run_at_startup,
             tray_tx,
@@ -398,7 +400,9 @@ impl DsMasterView {
                         view.read_snapshots();
                     }
                     view.check_notifications();
-                    if eng_changed {
+                    let cur_tray_batt = view.current_tray_battery();
+                    if eng_changed || cur_tray_batt != view.last_tray_battery {
+                        view.last_tray_battery = cur_tray_batt;
                         view.sync_tray_state();
                     }
                     let integrations_live = view.page == ActivePage::Settings
@@ -750,19 +754,35 @@ impl DsMasterView {
         cx.notify();
     }
 
+    fn current_tray_battery(&self) -> Option<(u8, bool)> {
+        let snap = self.selected_snapshot().or_else(|| self.snapshots.first())?;
+        if snap.battery_status == BatteryStatus::Unknown {
+            return None;
+        }
+        Some((
+            snap.battery_percent,
+            snap.battery_status == BatteryStatus::Charging,
+        ))
+    }
+
     fn build_tray_state(&self) -> TrayState {
         let cloak_enabled = self
             .engine
             .as_ref()
             .map(Engine::is_cloak_enabled)
             .unwrap_or(self.config.cloak_physical);
+        let (battery_percent, battery_charging) = match self.current_tray_battery() {
+            Some((pct, chg)) => (Some(pct), chg),
+            None => (None, false),
+        };
         TrayState {
             window_visible: !self.window_ctl.window_hidden.load(Ordering::Acquire),
             emulation: self.config.active_settings().emulation,
             cloak_enabled,
             hidhide_available: self.hidhide_available,
             connected_count: self.handles.len(),
-            active_profile: self.config.active_profile.clone(),
+            battery_percent,
+            battery_charging,
         }
     }
 
@@ -2631,8 +2651,8 @@ impl DsMasterView {
             .justify_between()
             .flex_1()
             .min_w(px(312.0))
-            .gap_5()
-            .p_5()
+            .gap_3()
+            .p_4()
             .bg(color(SURFACE))
             .border_1()
             .border_color(color(BORDER))
@@ -2641,7 +2661,7 @@ impl DsMasterView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex_shrink_0()
@@ -2671,7 +2691,7 @@ impl DsMasterView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_2()
                             .child(
                                 div()
                                     .text_size(px(13.0))
@@ -2690,7 +2710,7 @@ impl DsMasterView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .pt_4()
+                    .pt_3()
                     .border_t_1()
                     .border_color(color(BORDER))
                     .child(meter_row_with_width("L2 pull", 56.0, s.l2_analog, ACCENT))
@@ -2770,17 +2790,6 @@ impl DsMasterView {
             }),
         );
 
-        let qs_brightness_row = self.render_slider_row_range(
-            "Brightness",
-            format!("{}%", (profile.lightbar_brightness * 100.0).round() as u32),
-            profile.lightbar_brightness,
-            "0%",
-            "100%",
-            ACCENT,
-            ActiveSlider::LightbarBrightness,
-            cx,
-        );
-
         let mut mode_row = div().flex().flex_wrap().items_center().gap_2().child(
             div()
                 .w(px(36.0))
@@ -2806,35 +2815,15 @@ impl DsMasterView {
             );
         }
 
-        let mut led_row = div().flex().flex_wrap().items_center().gap_2().child(
-            div()
-                .w(px(36.0))
-                .flex_shrink_0()
-                .text_size(px(13.0))
-                .text_color(color(TEXT_MUTED))
-                .child("LEDs"),
-        );
-        for (label, mask) in PLAYER_LED_OPTIONS {
-            let active = profile.override_lightbar && profile.player_leds == mask;
-            led_row = led_row.child(
-                pill_button(SharedString::from(format!("qs-led-{label}")), label, active)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let st = this.config.active_settings_mut();
-                        st.override_lightbar = true;
-                        st.player_leds = mask;
-                        this.commit_config(cx);
-                    })),
-            );
-        }
-
+        let gyro_on = profile.gyro_mode != GyroAimMode::Off;
         let lighting_card = div()
             .flex()
             .flex_col()
             .justify_between()
             .flex_1()
             .min_w(px(312.0))
-            .gap_5()
-            .p_5()
+            .gap_3()
+            .p_4()
             .bg(color(SURFACE))
             .border_1()
             .border_color(color(BORDER))
@@ -2843,7 +2832,7 @@ impl DsMasterView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex_shrink_0()
@@ -2940,9 +2929,7 @@ impl DsMasterView {
                                     .child(swatch_chips)
                                     .child(qs_hue_bar),
                             )
-                            .child(qs_brightness_row)
-                            .child(mode_row)
-                            .child(led_row),
+                            .child(mode_row),
                     ),
             )
             .child(
@@ -2950,7 +2937,7 @@ impl DsMasterView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .pt_4()
+                    .pt_3()
                     .border_t_1()
                     .border_color(color(BORDER))
                     .child(
@@ -2999,7 +2986,7 @@ impl DsMasterView {
                     )
                     .child(
                         div()
-                            .h(px(32.0))
+                            .h(px(28.0))
                             .flex()
                             .items_center()
                             .justify_between()
@@ -3010,24 +2997,17 @@ impl DsMasterView {
                                     .child("Gyro aim"),
                             )
                             .child(
-                                pill_button(
-                                    "qs-gyro-cycle",
-                                    profile.gyro_mode.label(),
-                                    profile.gyro_mode != GyroAimMode::Off,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let st = this.config.active_settings_mut();
-                                    st.gyro_mode = match st.gyro_mode {
-                                        GyroAimMode::Off => GyroAimMode::HoldL2,
-                                        GyroAimMode::HoldL2 => GyroAimMode::HoldL1,
-                                        GyroAimMode::HoldL1 => GyroAimMode::HoldR2,
-                                        GyroAimMode::HoldR2 => GyroAimMode::HoldR1,
-                                        GyroAimMode::HoldR1 => GyroAimMode::TouchpadTouch,
-                                        GyroAimMode::TouchpadTouch => GyroAimMode::AlwaysOn,
-                                        GyroAimMode::AlwaysOn => GyroAimMode::Off,
-                                    };
-                                    this.commit_config(cx);
-                                })),
+                                toggle_switch("qs-gyro-sw", gyro_on).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let st = this.config.active_settings_mut();
+                                        st.gyro_mode = if st.gyro_mode == GyroAimMode::Off {
+                                            GyroAimMode::HoldL2
+                                        } else {
+                                            GyroAimMode::Off
+                                        };
+                                        this.commit_config(cx);
+                                    },
+                                )),
                             ),
                     ),
             );
@@ -3048,7 +3028,7 @@ impl DsMasterView {
         let interval_is_mono = connected && s.polling_hz > 0.5;
 
         let mut scan_val_el = div()
-            .text_size(px(32.0))
+            .text_size(px(24.0))
             .font_weight(FontWeight::NORMAL)
             .text_color(color(if connected { ACCENT } else { TEXT_MUTED }))
             .child(scan_label);
@@ -3190,8 +3170,8 @@ impl DsMasterView {
             .justify_between()
             .flex_1()
             .min_w(px(312.0))
-            .gap_5()
-            .p_5()
+            .gap_3()
+            .p_4()
             .bg(color(SURFACE))
             .border_1()
             .border_color(color(BORDER))
@@ -3200,7 +3180,7 @@ impl DsMasterView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex_shrink_0()
@@ -3241,6 +3221,42 @@ impl DsMasterView {
                                         cx.notify();
                                     }))
                                     .child("Details"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(color(TEXT_SECONDARY))
+                                            .child("Battery"),
+                                    )
+                                    .child(batt_val_el),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(color(WELL_BG))
+                                    .border_1()
+                                    .border_color(color(BORDER))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(batt_pct as f32 / 100.0))
+                                            .rounded_full()
+                                            .bg(color(batt_col)),
+                                    ),
                             ),
                     )
                     .child(
@@ -3310,48 +3326,9 @@ impl DsMasterView {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .pt_4()
+                    .pt_3()
                     .border_t_1()
                     .border_color(color(BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(color(TEXT_SECONDARY))
-                                            .child("Battery"),
-                                    )
-                                    .child(batt_val_el),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(6.0))
-                                    .rounded_full()
-                                    .bg(color(WELL_BG))
-                                    .border_1()
-                                    .border_color(color(BORDER))
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(relative(batt_pct as f32 / 100.0))
-                                            .rounded_full()
-                                            .bg(color(batt_col)),
-                                    ),
-                            ),
-                    )
                     .child(status_inset_pill(pill_text, connected)),
             );
 
