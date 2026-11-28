@@ -6324,6 +6324,65 @@ impl DsMasterView {
             caps_grid = caps_grid.child(status_inset_pill(cap, connected));
         }
 
+        let bt_idle_mins = self.config.bt_idle_disconnect_mins;
+        let selected_bt_mac = self
+            .selected_snapshot()
+            .filter(|s| s.transport == Transport::Bluetooth && s.mac_address != [0; 6])
+            .map(|s| s.mac_address);
+
+        let mut bt_idle_pills = div().flex().flex_wrap().gap_2();
+        for (mins, label) in [
+            (0u16, "Off"),
+            (5u16, "5m"),
+            (10u16, "10m"),
+            (15u16, "15m"),
+            (20u16, "20m"),
+            (30u16, "30m"),
+        ] {
+            let active = bt_idle_mins == mins;
+            bt_idle_pills = bt_idle_pills.child(
+                pill_button(
+                    SharedString::from(format!("di-bt-idle-{mins}")),
+                    label,
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.config.bt_idle_disconnect_mins = mins;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+
+        let bt_power_card = if let Some(mac) = selected_bt_mac {
+            section_card_with_action(
+                "Bluetooth power",
+                subtle_button("di-bt-disc-now", "Disconnect BT").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if let Some(engine) = &this.engine {
+                            match engine.disconnect_bluetooth_mac(mac) {
+                                Ok(()) => this.set_status_notice(
+                                    "Bluetooth controller disconnected",
+                                    Some(NOTICE_TTL),
+                                ),
+                                Err(e) => this.set_status_notice(
+                                    format!("Bluetooth disconnect failed: {e}"),
+                                    Some(NOTICE_ERROR_TTL),
+                                ),
+                            }
+                            cx.notify();
+                        }
+                    },
+                )),
+            )
+        } else {
+            section_card("Bluetooth power")
+        }
+        .child(setting_row(
+            "Bluetooth auto-disconnect",
+            "Drop Bluetooth after inactivity so the controller powers off",
+            bt_idle_pills,
+        ));
+
         let caps_card = section_card("Supported device features").child(caps_grid);
 
         div()
@@ -6350,6 +6409,7 @@ impl DsMasterView {
                     ),
             )
             .child(info_card)
+            .child(bt_power_card)
             .child(caps_card)
     }
 
@@ -7371,36 +7431,8 @@ impl DsMasterView {
         let notif_on = self.config.notifications_enabled;
         let notif_conn_on = self.config.notify_connect_disconnect;
         let notif_low_on = self.config.notify_low_battery;
-        let bt_idle_mins = self.config.bt_idle_disconnect_mins;
-        let selected_bt_mac = self
-            .selected_snapshot()
-            .filter(|s| s.transport == Transport::Bluetooth && s.mac_address != [0; 6])
-            .map(|s| s.mac_address);
 
-        let mut bt_idle_pills = div().flex().flex_wrap().gap_2();
-        for (mins, label) in [
-            (0u16, "Off"),
-            (5u16, "5m"),
-            (10u16, "10m"),
-            (15u16, "15m"),
-            (20u16, "20m"),
-            (30u16, "30m"),
-        ] {
-            let active = bt_idle_mins == mins;
-            bt_idle_pills = bt_idle_pills.child(
-                pill_button(
-                    SharedString::from(format!("set-bt-idle-{mins}")),
-                    label,
-                    active,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.config.bt_idle_disconnect_mins = mins;
-                    this.commit_config(cx);
-                })),
-            );
-        }
-
-        let mut power_notif_card = section_card("Notifications & Bluetooth power")
+        let power_notif_card = section_card("Notifications")
             .flex_1()
             .child(
                 div()
@@ -7444,73 +7476,8 @@ impl DsMasterView {
                                 this.commit_config(cx);
                             }),
                         ),
-                    ))
-                    .child(
-                        div()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(color(BORDER))
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(color(TEXT))
-                                            .child("Bluetooth auto-disconnect"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(color(TEXT_MUTED))
-                                            .child(
-                                                "Drop Bluetooth after inactivity so the controller powers off",
-                                            ),
-                                    ),
-                            )
-                            .child(bt_idle_pills),
-                    ),
+                    )),
             );
-
-        if let Some(mac) = selected_bt_mac {
-            power_notif_card = power_notif_card.child(
-                div()
-                    .mt_auto()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(color(BORDER))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(status_info_pill("Disconnect active Bluetooth controller now"))
-                    .child(
-                        subtle_button("set-bt-disc-now", "Disconnect BT").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                if let Some(engine) = &this.engine {
-                                    match engine.disconnect_bluetooth_mac(mac) {
-                                        Ok(()) => this.set_status_notice(
-                                            "Bluetooth controller disconnected",
-                                            Some(NOTICE_TTL),
-                                        ),
-                                        Err(e) => this.set_status_notice(
-                                            format!("Bluetooth disconnect failed: {e}"),
-                                            Some(NOTICE_ERROR_TTL),
-                                        ),
-                                    }
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                    ),
-            );
-        }
 
         let dsu_on = self.config.dsu_enabled;
         let dsx_on = self.config.dsx_udp_enabled;
