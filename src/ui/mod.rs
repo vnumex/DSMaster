@@ -5834,12 +5834,18 @@ impl DsMasterView {
         if !fs_on {
             fs_turn_pills = fs_turn_pills.opacity(0.45);
         }
-        for ppt in [1000.0f32, 1500.0, 2000.0, 3000.0, 4000.0] {
-            let active = fs_on && (profile.flick_stick_pixels_per_turn - ppt).abs() < 25.0;
+        for (label, ppt) in [
+            ("2k", 2000.0f32),
+            ("4k", 4000.0),
+            ("8k", 8000.0),
+            ("12k", 12000.0),
+            ("16k", 16000.0),
+        ] {
+            let active = fs_on && (profile.flick_stick_pixels_per_turn - ppt).abs() < 100.0;
             fs_turn_pills = fs_turn_pills.child(
                 pill_button(
                     SharedString::from(format!("mr-fs-ppt-{}", ppt as u32)),
-                    format!("{}", ppt as u32),
+                    label,
                     active,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -5851,15 +5857,15 @@ impl DsMasterView {
             );
         }
         fs_turn_pills = fs_turn_pills
-            .child(subtle_button("mr-fs-dec", "-100").on_click(cx.listener(|this, _, _, cx| {
+            .child(subtle_button("mr-fs-dec", "-500").on_click(cx.listener(|this, _, _, cx| {
                 let s = this.config.active_settings_mut();
-                s.flick_stick_pixels_per_turn = (s.flick_stick_pixels_per_turn - 100.0).max(200.0);
+                s.flick_stick_pixels_per_turn = (s.flick_stick_pixels_per_turn - 500.0).max(200.0);
                 this.commit_config(cx);
             })))
-            .child(subtle_button("mr-fs-inc", "+100").on_click(cx.listener(|this, _, _, cx| {
+            .child(subtle_button("mr-fs-inc", "+500").on_click(cx.listener(|this, _, _, cx| {
                 let s = this.config.active_settings_mut();
                 s.flick_stick_pixels_per_turn =
-                    (s.flick_stick_pixels_per_turn + 100.0).min(12000.0);
+                    (s.flick_stick_pixels_per_turn + 500.0).min(40_000.0);
                 this.commit_config(cx);
             })));
 
@@ -5867,7 +5873,11 @@ impl DsMasterView {
         if !fs_on {
             fs_speed_pills = fs_speed_pills.opacity(0.45);
         }
-        for (label, ms) in [("Fast (60ms)", 60u16), ("Normal (100ms)", 100), ("Smooth (150ms)", 150)] {
+        for (label, ms) in [
+            ("Snappy (40ms)", 40u16),
+            ("Fast (80ms)", 80),
+            ("Smooth (130ms)", 130),
+        ] {
             let active = fs_on && profile.flick_stick_flick_ms == ms;
             fs_speed_pills = fs_speed_pills.child(
                 pill_button(SharedString::from(format!("mr-fs-ms-{ms}")), label, active).on_click(

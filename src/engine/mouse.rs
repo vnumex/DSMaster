@@ -272,7 +272,7 @@ impl MouseInjector {
         let mag = nx.hypot(ny);
         let engage = threshold.clamp(0.45, 0.95);
         let release = engage * 0.75;
-        let ppt = pixels_per_turn.clamp(200.0, 12000.0);
+        let ppt = pixels_per_turn.clamp(200.0, 40_000.0);
         let px_per_rad = ppt / std::f32::consts::TAU;
 
         let mut delta_rad = 0.0f32;
@@ -284,7 +284,7 @@ impl MouseInjector {
                 self.flick_prev_angle = angle;
                 self.flick_pending_rad = angle;
                 self.flick_elapsed_s = 0.0;
-                self.flick_duration_s = (flick_ms.clamp(30, 250) as f32) / 1000.0;
+                self.flick_duration_s = (flick_ms.clamp(20, 250) as f32) / 1000.0;
             }
         } else if mag >= release {
             let angle = nx.atan2(ny);
@@ -301,7 +301,7 @@ impl MouseInjector {
         }
 
         if self.flick_pending_rad.abs() > 1e-5 {
-            let dur = self.flick_duration_s.max(0.03);
+            let dur = self.flick_duration_s.max(0.02);
             let t0 = (self.flick_elapsed_s / dur).clamp(0.0, 1.0);
             self.flick_elapsed_s += dt;
             let t1 = (self.flick_elapsed_s / dur).clamp(0.0, 1.0);

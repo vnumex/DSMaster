@@ -404,7 +404,7 @@ fn default_bt_haptics_gain() -> f32 {
 }
 
 fn default_flick_pixels_per_turn() -> f32 {
-    2000.0
+    8000.0
 }
 
 fn default_flick_threshold() -> f32 {
@@ -412,7 +412,7 @@ fn default_flick_threshold() -> f32 {
 }
 
 fn default_flick_ms() -> u16 {
-    100
+    80
 }
 
 pub const MOD_CTRL: u8 = 1 << 0;
