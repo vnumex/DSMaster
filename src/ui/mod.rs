@@ -5908,7 +5908,7 @@ impl DsMasterView {
             );
         }
 
-        let flick_stick_box = div()
+        let mut flick_stick_box = div()
             .flex()
             .flex_col()
             .gap_2()
@@ -5970,6 +5970,49 @@ impl DsMasterView {
                     )
                     .child(fs_thresh_pills),
             );
+
+        if fs_on
+            && (profile.gyro_output != GyroOutputMode::Mouse
+                || profile.gyro_mode == GyroAimMode::Off)
+        {
+            let warn_msg = if profile.gyro_output != GyroOutputMode::Mouse {
+                "Gyro output is not set to Mouse — Flick Stick only turns horizontally; set Gyro to Mouse for vertical aiming"
+            } else {
+                "Gyro aim is Off — Flick Stick only turns horizontally; enable Gyro (Always On) for vertical aiming"
+            };
+            flick_stick_box = flick_stick_box.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.0))
+                    .bg(color(WARN_SURFACE))
+                    .border_1()
+                    .border_color(color(WARN_BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(color(WARN))
+                            .child(warn_msg),
+                    )
+                    .child(
+                        subtle_button("mr-fs-fix-gyro", "Set Gyro → Mouse").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                let s = this.config.active_settings_mut();
+                                s.gyro_output = GyroOutputMode::Mouse;
+                                if s.gyro_mode == GyroAimMode::Off {
+                                    s.gyro_mode = GyroAimMode::AlwaysOn;
+                                }
+                                this.commit_config(cx);
+                            }),
+                        ),
+                    ),
+            );
+        }
 
         let motion_card = section_card("Touchpad, gyro & Flick Stick")
             .flex_1()
