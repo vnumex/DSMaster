@@ -4065,7 +4065,7 @@ impl DsMasterView {
                 .border_color(color(BORDER))
                 .child(setting_row(
                     "Rumble feedback",
-                    "Route virtual controller rumble back to the physical DualSense",
+                    "Enable standard in-game controller vibration",
                     toggle_switch("tp-rumble-sw", profile.enable_rumble).on_click(cx.listener(
                         |this, _, _, cx| {
                             let s = this.config.active_settings_mut();
@@ -4433,8 +4433,8 @@ impl DsMasterView {
 
         let haptics_card = section_card("Bluetooth HD haptics")
             .child(setting_row(
-                "Audio-to-Haptics (voice coils)",
-                "Drives DualSense voice coils from low-passed audio (0x32 / 0x35); pauses legacy rumble while active.",
+                "Audio-to-Haptics",
+                "Vibrate the controller in sync with PC bass and sound effects (replaces standard game rumble)",
                 toggle_switch("bt-hap-toggle", profile.bt_haptics_enabled).on_click(
                     cx.listener(|this, _, _, cx| {
                         let s = this.config.active_settings_mut();
