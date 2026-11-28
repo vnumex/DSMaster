@@ -6353,10 +6353,16 @@ impl DsMasterView {
             );
         }
 
-        let bt_power_card = if let Some(mac) = selected_bt_mac {
-            section_card_with_action(
-                "Bluetooth power",
-                subtle_button("di-bt-disc-now", "Disconnect BT").on_click(cx.listener(
+        let mut bt_controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(bt_idle_pills);
+
+        if let Some(mac) = selected_bt_mac {
+            bt_controls = bt_controls.child(
+                subtle_button("di-bt-disc-now", "Disconnect Now").on_click(cx.listener(
                     move |this, _, _, cx| {
                         if let Some(engine) = &this.engine {
                             match engine.disconnect_bluetooth_mac(mac) {
@@ -6373,14 +6379,13 @@ impl DsMasterView {
                         }
                     },
                 )),
-            )
-        } else {
-            section_card("Bluetooth power")
+            );
         }
-        .child(setting_row(
+
+        let bt_power_card = section_card("Bluetooth power").child(setting_row(
             "Bluetooth auto-disconnect",
             "Drop Bluetooth after inactivity so the controller powers off",
-            bt_idle_pills,
+            bt_controls,
         ));
 
         let caps_card = section_card("Supported device features").child(caps_grid);
