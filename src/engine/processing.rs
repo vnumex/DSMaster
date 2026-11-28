@@ -477,8 +477,11 @@ pub fn process_input(
         cal.gyro[2].apply(raw.gyro[2]),
     ];
 
-    let mut right_x = right[0];
-    let mut right_y = right[1];
+    let (mut right_x, mut right_y) = if profile.flick_stick_enabled {
+        (128, 128)
+    } else {
+        (right[0], right[1])
+    };
     if profile.gyro_output == GyroOutputMode::RightStick {
         if let Some((gx, gy)) = compute_gyro_delta(
             calibrated_gyro,

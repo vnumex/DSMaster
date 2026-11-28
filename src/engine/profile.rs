@@ -403,6 +403,306 @@ fn default_bt_haptics_gain() -> f32 {
     0.75
 }
 
+fn default_flick_pixels_per_turn() -> f32 {
+    2000.0
+}
+
+fn default_flick_threshold() -> f32 {
+    0.80
+}
+
+fn default_flick_ms() -> u16 {
+    100
+}
+
+pub const MOD_CTRL: u8 = 1 << 0;
+pub const MOD_SHIFT: u8 = 1 << 1;
+pub const MOD_ALT: u8 = 1 << 2;
+pub const MOD_WIN: u8 = 1 << 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKey {
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    PlayPause,
+    NextTrack,
+    PrevTrack,
+}
+
+impl MediaKey {
+    pub const ALL: [Self; 6] = [
+        Self::VolumeMute,
+        Self::VolumeDown,
+        Self::VolumeUp,
+        Self::PlayPause,
+        Self::PrevTrack,
+        Self::NextTrack,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VolumeUp => "Vol +",
+            Self::VolumeDown => "Vol -",
+            Self::VolumeMute => "Mute",
+            Self::PlayPause => "Play/Pause",
+            Self::NextTrack => "Next",
+            Self::PrevTrack => "Prev",
+        }
+    }
+
+    #[inline]
+    pub fn vk(self) -> u16 {
+        match self {
+            Self::VolumeMute => 0xAD,
+            Self::VolumeDown => 0xAE,
+            Self::VolumeUp => 0xAF,
+            Self::NextTrack => 0xB0,
+            Self::PrevTrack => 0xB1,
+            Self::PlayPause => 0xB3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MacroStep {
+    pub vk: u16,
+    pub modifiers: u8,
+    pub delay_ms: u16,
+}
+
+pub const MAX_MACRO_STEPS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ButtonAction {
+    #[default]
+    None,
+    Key {
+        vk: u16,
+        #[serde(default)]
+        modifiers: u8,
+        #[serde(default)]
+        hold: bool,
+    },
+    Media(MediaKey),
+    Macro {
+        steps: [MacroStep; MAX_MACRO_STEPS],
+        len: u8,
+    },
+}
+
+impl ButtonAction {
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub fn format_label(&self) -> String {
+        match *self {
+            Self::None => "None".to_owned(),
+            Self::Key {
+                vk,
+                modifiers,
+                hold,
+            } => {
+                let combo = format_key_combo(vk, modifiers);
+                if hold {
+                    format!("{combo} (Hold)")
+                } else {
+                    combo
+                }
+            }
+            Self::Media(m) => m.label().to_owned(),
+            Self::Macro { steps, len } => {
+                let n = (len as usize).min(MAX_MACRO_STEPS);
+                if n == 0 {
+                    "Macro (empty)".to_owned()
+                } else if n == 1 {
+                    format!("Macro: {}", format_key_combo(steps[0].vk, steps[0].modifiers))
+                } else {
+                    format!("Macro ({n} steps)")
+                }
+            }
+        }
+    }
+}
+
+pub fn format_key_combo(vk: u16, modifiers: u8) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(5);
+    if (modifiers & MOD_CTRL) != 0 {
+        parts.push("Ctrl");
+    }
+    if (modifiers & MOD_SHIFT) != 0 {
+        parts.push("Shift");
+    }
+    if (modifiers & MOD_ALT) != 0 {
+        parts.push("Alt");
+    }
+    if (modifiers & MOD_WIN) != 0 {
+        parts.push("Win");
+    }
+    let key = vk_label(vk);
+    if parts.is_empty() {
+        key
+    } else {
+        format!("{}+{key}", parts.join("+"))
+    }
+}
+
+pub fn vk_label(vk: u16) -> String {
+    match vk {
+        0x08 => "Backspace".to_owned(),
+        0x09 => "Tab".to_owned(),
+        0x0D => "Enter".to_owned(),
+        0x13 => "Pause".to_owned(),
+        0x14 => "CapsLock".to_owned(),
+        0x1B => "Esc".to_owned(),
+        0x20 => "Space".to_owned(),
+        0x21 => "PgUp".to_owned(),
+        0x22 => "PgDn".to_owned(),
+        0x23 => "End".to_owned(),
+        0x24 => "Home".to_owned(),
+        0x25 => "Left".to_owned(),
+        0x26 => "Up".to_owned(),
+        0x27 => "Right".to_owned(),
+        0x28 => "Down".to_owned(),
+        0x2C => "PrintScr".to_owned(),
+        0x2D => "Insert".to_owned(),
+        0x2E => "Delete".to_owned(),
+        0x30..=0x39 => ((vk as u8) as char).to_string(),
+        0x41..=0x5A => ((vk as u8) as char).to_string(),
+        0x60..=0x69 => format!("Num{}", vk - 0x60),
+        0x6A => "Num*".to_owned(),
+        0x6B => "Num+".to_owned(),
+        0x6D => "Num-".to_owned(),
+        0x6E => "Num.".to_owned(),
+        0x6F => "Num/".to_owned(),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        0x90 => "NumLock".to_owned(),
+        0x91 => "ScrLock".to_owned(),
+        0xAD => "Vol Mute".to_owned(),
+        0xAE => "Vol -".to_owned(),
+        0xAF => "Vol +".to_owned(),
+        0xB0 => "Next".to_owned(),
+        0xB1 => "Prev".to_owned(),
+        0xB2 => "Stop".to_owned(),
+        0xB3 => "Play/Pause".to_owned(),
+        0xBA => ";".to_owned(),
+        0xBB => "=".to_owned(),
+        0xBC => ",".to_owned(),
+        0xBD => "-".to_owned(),
+        0xBE => ".".to_owned(),
+        0xBF => "/".to_owned(),
+        0xC0 => "`".to_owned(),
+        0xDB => "[".to_owned(),
+        0xDC => "\\".to_owned(),
+        0xDD => "]".to_owned(),
+        0xDE => "'".to_owned(),
+        other => format!("VK 0x{other:02X}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActionMap {
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub cross: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub circle: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub square: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub triangle: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub l1: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub r1: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub l2: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub r2: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub l3: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub r3: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub options: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub create: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub touchpad: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub mic_mute: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub dpad_up: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub dpad_down: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub dpad_left: ButtonAction,
+    #[serde(skip_serializing_if = "ButtonAction::is_none")]
+    pub dpad_right: ButtonAction,
+}
+
+impl ActionMap {
+    #[inline]
+    pub fn get(&self, src: RemappableButton) -> ButtonAction {
+        match src {
+            RemappableButton::None => ButtonAction::None,
+            RemappableButton::Cross => self.cross,
+            RemappableButton::Circle => self.circle,
+            RemappableButton::Square => self.square,
+            RemappableButton::Triangle => self.triangle,
+            RemappableButton::L1 => self.l1,
+            RemappableButton::R1 => self.r1,
+            RemappableButton::L2 => self.l2,
+            RemappableButton::R2 => self.r2,
+            RemappableButton::L3 => self.l3,
+            RemappableButton::R3 => self.r3,
+            RemappableButton::Options => self.options,
+            RemappableButton::Create => self.create,
+            RemappableButton::Touchpad => self.touchpad,
+            RemappableButton::MicMute => self.mic_mute,
+            RemappableButton::DpadUp => self.dpad_up,
+            RemappableButton::DpadDown => self.dpad_down,
+            RemappableButton::DpadLeft => self.dpad_left,
+            RemappableButton::DpadRight => self.dpad_right,
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, src: RemappableButton, action: ButtonAction) {
+        match src {
+            RemappableButton::None => {}
+            RemappableButton::Cross => self.cross = action,
+            RemappableButton::Circle => self.circle = action,
+            RemappableButton::Square => self.square = action,
+            RemappableButton::Triangle => self.triangle = action,
+            RemappableButton::L1 => self.l1 = action,
+            RemappableButton::R1 => self.r1 = action,
+            RemappableButton::L2 => self.l2 = action,
+            RemappableButton::R2 => self.r2 = action,
+            RemappableButton::L3 => self.l3 = action,
+            RemappableButton::R3 => self.r3 = action,
+            RemappableButton::Options => self.options = action,
+            RemappableButton::Create => self.create = action,
+            RemappableButton::Touchpad => self.touchpad = action,
+            RemappableButton::MicMute => self.mic_mute = action,
+            RemappableButton::DpadUp => self.dpad_up = action,
+            RemappableButton::DpadDown => self.dpad_down = action,
+            RemappableButton::DpadLeft => self.dpad_left = action,
+            RemappableButton::DpadRight => self.dpad_right = action,
+        }
+    }
+
+    pub fn custom_count(&self) -> usize {
+        RemappableButton::SOURCES
+            .iter()
+            .filter(|&&s| !self.get(s).is_none())
+            .count()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RemappableButton {
     #[default]
@@ -739,6 +1039,8 @@ pub struct ControllerProfile {
     pub triggers: TriggerTuning,
     pub right_trigger_tuning: TriggerTuning,
     pub button_map: ButtonMap,
+    #[serde(default)]
+    pub action_map: ActionMap,
     pub touchpad_mouse: bool,
     pub touchpad_sensitivity: f32,
     #[serde(default = "default_true")]
@@ -756,6 +1058,14 @@ pub struct ControllerProfile {
     pub gyro_use_roll: bool,
     pub gyro_invert_x: bool,
     pub gyro_invert_y: bool,
+    #[serde(default)]
+    pub flick_stick_enabled: bool,
+    #[serde(default = "default_flick_pixels_per_turn")]
+    pub flick_stick_pixels_per_turn: f32,
+    #[serde(default = "default_flick_threshold")]
+    pub flick_stick_threshold: f32,
+    #[serde(default = "default_flick_ms")]
+    pub flick_stick_flick_ms: u16,
     pub turbo: TurboConfig,
     pub bt_speaker_enabled: bool,
     #[serde(default = "default_bt_speaker_volume")]
@@ -806,6 +1116,7 @@ impl Default for ControllerProfile {
             triggers: TriggerTuning::default(),
             right_trigger_tuning: TriggerTuning::default(),
             button_map: ButtonMap::default(),
+            action_map: ActionMap::default(),
             touchpad_mouse: false,
             touchpad_sensitivity: 1.0,
             touchpad_scroll: true,
@@ -819,6 +1130,10 @@ impl Default for ControllerProfile {
             gyro_use_roll: false,
             gyro_invert_x: false,
             gyro_invert_y: false,
+            flick_stick_enabled: false,
+            flick_stick_pixels_per_turn: default_flick_pixels_per_turn(),
+            flick_stick_threshold: default_flick_threshold(),
+            flick_stick_flick_ms: default_flick_ms(),
             turbo: TurboConfig::default(),
             bt_speaker_enabled: false,
             bt_speaker_volume: 0.8,

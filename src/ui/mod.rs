@@ -48,9 +48,11 @@ use crate::drivers::{DriverInstallJob, DriverInstallPhase, DriverKind};
 use crate::emu::EmulationMode;
 use crate::emu::dualsense::is_usbip_win2_installed;
 use crate::emu::vigem::is_vigem_installed;
+use crate::engine::keyboard::{poll_recorded_hotkey, send_combo_tap};
 use crate::engine::profile::{
-    CustomTriggerMode, DeadzoneShape, GyroAimMode, GyroOutputMode, LightbarMode,
-    MicMuteLedOverride, RemappableButton, ResponseCurve, StickTuning, TriggerPreset,
+    ButtonAction, CustomTriggerMode, DeadzoneShape, GyroAimMode, GyroOutputMode, LightbarMode,
+    MAX_MACRO_STEPS, MOD_ALT, MOD_CTRL, MOD_SHIFT, MacroStep, MediaKey, MicMuteLedOverride,
+    RemappableButton, ResponseCurve, StickTuning, TriggerPreset, format_key_combo,
 };
 use crate::engine::profiles_store::{
     AppConfig, NamedProfile, config_path, load_config, open_config_dir, save_config,
@@ -244,6 +246,12 @@ fn fmt_hms(secs: u32) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyRecordTarget {
+    SingleKey(RemappableButton),
+    MacroStep(RemappableButton),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct KnownSessionInfo {
     is_edge: bool,
@@ -272,6 +280,8 @@ pub struct DsMasterView {
     drawer_open: bool,
     show_raw_sticks: bool,
     selected_remap_src: Option<RemappableButton>,
+    recording_hotkey: Option<HotkeyRecordTarget>,
+    macro_step_delay_ms: u16,
     last_topology_version: u64,
     handles: Vec<Arc<SeqLock<TelemetrySnapshot>>>,
     selected_idx: usize,
@@ -342,6 +352,8 @@ impl DsMasterView {
             drawer_open: true,
             show_raw_sticks: false,
             selected_remap_src: None,
+            recording_hotkey: None,
+            macro_step_delay_ms: 50,
             last_topology_version: 0,
             handles: Vec::new(),
             selected_idx: 0,
@@ -369,10 +381,14 @@ impl DsMasterView {
 
         this._watch_task = cx.spawn(async move |weak_this, cx| {
             loop {
+                let fast = weak_this
+                    .read_with(cx, |view, _| view.recording_hotkey.is_some())
+                    .unwrap_or(false);
                 cx.background_executor()
-                    .timer(Duration::from_millis(250))
+                    .timer(Duration::from_millis(if fast { 30 } else { 250 }))
                     .await;
                 let res = weak_this.update(cx, |view, cx| {
+                    let hotkey_changed = view.poll_hotkey_recording(cx);
                     let eng_changed = view.sync_from_engine();
                     let install_changed = view.poll_driver_install();
                     let update_check_changed = view.poll_update_check();
@@ -387,7 +403,8 @@ impl DsMasterView {
                     }
                     let integrations_live = view.page == ActivePage::Settings
                         && (view.config.dsu_enabled || view.config.dsx_udp_enabled);
-                    if eng_changed
+                    if hotkey_changed
+                        || eng_changed
                         || install_changed
                         || update_check_changed
                         || update_install_changed
@@ -463,6 +480,76 @@ impl DsMasterView {
         self.snapshots.clear();
         for handle in &self.handles {
             self.snapshots.push(handle.read());
+        }
+    }
+
+    fn poll_hotkey_recording(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.recording_hotkey else {
+            return false;
+        };
+        let Some(res) = poll_recorded_hotkey() else {
+            return false;
+        };
+        self.recording_hotkey = None;
+        match res {
+            Err(()) => {
+                self.set_status_notice("Hotkey recording cancelled", Some(NOTICE_TTL));
+                true
+            }
+            Ok((vk, modifiers)) => {
+                let label = format_key_combo(vk, modifiers);
+                match target {
+                    HotkeyRecordTarget::SingleKey(src) => {
+                        let hold = matches!(
+                            self.config.active_settings().action_map.get(src),
+                            ButtonAction::Key { hold: true, .. }
+                        );
+                        self.config.active_settings_mut().action_map.set(
+                            src,
+                            ButtonAction::Key {
+                                vk,
+                                modifiers,
+                                hold,
+                            },
+                        );
+                        self.commit_config(cx);
+                        self.set_status_notice(
+                            format!("Bound {} → {label}", src.label()),
+                            Some(NOTICE_TTL),
+                        );
+                    }
+                    HotkeyRecordTarget::MacroStep(src) => {
+                        let cur = self.config.active_settings().action_map.get(src);
+                        let (mut steps, mut len) = match cur {
+                            ButtonAction::Macro { steps, len } => (steps, len as usize),
+                            _ => ([MacroStep::default(); MAX_MACRO_STEPS], 0),
+                        };
+                        if len < MAX_MACRO_STEPS {
+                            steps[len] = MacroStep {
+                                vk,
+                                modifiers,
+                                delay_ms: self.macro_step_delay_ms,
+                            };
+                            len += 1;
+                            self.config
+                                .active_settings_mut()
+                                .action_map
+                                .set(src, ButtonAction::Macro { steps, len: len as u8 });
+                            self.commit_config(cx);
+                            self.set_status_notice(
+                                format!("Added macro step {len}: {label} to {}", src.label()),
+                                Some(NOTICE_TTL),
+                            );
+                        } else {
+                            self.set_status_notice(
+                                "Macro is full (max 8 steps)",
+                                Some(NOTICE_ERROR_TTL),
+                            );
+                        }
+                    }
+                }
+                true
+            }
         }
     }
 
@@ -5104,8 +5191,17 @@ impl DsMasterView {
         let mut source_grid = div().flex().flex_wrap().gap_2();
         for src in RemappableButton::SOURCES {
             let dst = profile.button_map.get(src);
-            let is_custom = dst != src;
+            let act = profile.action_map.get(src);
+            let has_act = !act.is_none();
+            let is_custom = dst != src || has_act;
             let is_sel = self.selected_remap_src == Some(src);
+            let badge_text = if has_act {
+                act.format_label()
+            } else if dst != src {
+                format!("→ {}", dst.label())
+            } else {
+                dst.label().to_owned()
+            };
             source_grid = source_grid.child(
                 div()
                     .id(SharedString::from(format!("mr-src-{}", src.label())))
@@ -5137,6 +5233,7 @@ impl DsMasterView {
                     .cursor_pointer()
                     .hover(|s| s.border_color(color(BORDER_STRONG)))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.recording_hotkey = None;
                         this.selected_remap_src = if this.selected_remap_src == Some(src) {
                             None
                         } else {
@@ -5155,18 +5252,14 @@ impl DsMasterView {
                         div()
                             .text_xs()
                             .font_family(FONT_MONO)
-                            .text_color(color(if dst == RemappableButton::None {
+                            .text_color(color(if !has_act && dst == RemappableButton::None {
                                 DANGER
                             } else if is_custom {
                                 ACCENT
                             } else {
                                 TEXT_MUTED
                             }))
-                            .child(if is_custom {
-                                format!("→ {}", dst.label())
-                            } else {
-                                dst.label().to_owned()
-                            }),
+                            .child(badge_text),
                     ),
             );
         }
@@ -5206,9 +5299,9 @@ impl DsMasterView {
             );
         }
 
-        let custom_count = profile.button_map.custom_count();
+        let custom_count = profile.button_map.custom_count() + profile.action_map.custom_count();
         let mut remap_card = section_card_with_action(
-            "Button remapping",
+            "Button remapping & hotkeys",
             div()
                 .flex()
                 .items_center()
@@ -5226,8 +5319,11 @@ impl DsMasterView {
                 .child(
                     subtle_button("mr-map-reset-all", "Reset all").on_click(cx.listener(
                         |this, _, _, cx| {
-                            this.config.active_settings_mut().button_map = Default::default();
+                            let s = this.config.active_settings_mut();
+                            s.button_map = Default::default();
+                            s.action_map = Default::default();
                             this.selected_remap_src = None;
+                            this.recording_hotkey = None;
                             this.commit_config(cx);
                         },
                     )),
@@ -5238,7 +5334,7 @@ impl DsMasterView {
             div()
                 .text_size(px(13.0))
                 .text_color(color(TEXT_MUTED))
-                .child("Click any physical button to remap, swap, or disable it"),
+                .child("Click any button (e.g. Mic Mute) to remap or bind a keyboard hotkey, media key, or macro"),
         )
         .child(source_grid);
 
@@ -5290,6 +5386,219 @@ impl DsMasterView {
                 );
             }
 
+            let cur_act = profile.action_map.get(src);
+            let recording_single = self.recording_hotkey == Some(HotkeyRecordTarget::SingleKey(src));
+            let recording_macro = self.recording_hotkey == Some(HotkeyRecordTarget::MacroStep(src));
+
+            let mut hotkey_actions = div().flex().flex_wrap().items_center().gap_2().child(
+                pill_button(
+                    "mr-act-rec",
+                    if recording_single {
+                        "Press any key… (Esc cancels)"
+                    } else {
+                        "Record hotkey"
+                    },
+                    recording_single,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.recording_hotkey = if this.recording_hotkey
+                        == Some(HotkeyRecordTarget::SingleKey(src))
+                    {
+                        None
+                    } else {
+                        Some(HotkeyRecordTarget::SingleKey(src))
+                    };
+                    cx.notify();
+                })),
+            );
+
+            if let ButtonAction::Key {
+                vk,
+                modifiers,
+                hold,
+            } = cur_act
+            {
+                hotkey_actions = hotkey_actions
+                    .child(
+                        pill_button(
+                            "mr-act-hold",
+                            if hold { "Mode: Hold" } else { "Mode: Tap" },
+                            hold,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.config.active_settings_mut().action_map.set(
+                                src,
+                                ButtonAction::Key {
+                                    vk,
+                                    modifiers,
+                                    hold: !hold,
+                                },
+                            );
+                            this.commit_config(cx);
+                        })),
+                    )
+                    .child(subtle_button("mr-act-test", "Test").on_click(cx.listener(
+                        move |_, _, _, _| {
+                            send_combo_tap(vk, modifiers);
+                        },
+                    )));
+            }
+
+            if !cur_act.is_none() {
+                hotkey_actions = hotkey_actions.child(
+                    subtle_button("mr-act-clear", "Clear").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.config
+                                .active_settings_mut()
+                                .action_map
+                                .set(src, ButtonAction::None);
+                            this.recording_hotkey = None;
+                            this.commit_config(cx);
+                        },
+                    )),
+                );
+            }
+
+            let quick_hotkeys: [(&str, u16, u8); 8] = [
+                ("Ctrl+Shift+M", 0x4D, MOD_CTRL | MOD_SHIFT),
+                ("Ctrl+Shift+D", 0x44, MOD_CTRL | MOD_SHIFT),
+                ("F13", 0x7C, 0),
+                ("F14", 0x7D, 0),
+                ("F15", 0x7E, 0),
+                ("F16", 0x7F, 0),
+                ("PrintScr", 0x2C, 0),
+                ("Alt+F10", 0x79, MOD_ALT),
+            ];
+            let mut quick_hk_row = div().flex().flex_wrap().gap_1();
+            for (label, vk, mods) in quick_hotkeys {
+                let active = matches!(
+                    cur_act,
+                    ButtonAction::Key {
+                        vk: cvk,
+                        modifiers: cm,
+                        ..
+                    } if cvk == vk && cm == mods
+                );
+                quick_hk_row = quick_hk_row.child(
+                    pill_button(SharedString::from(format!("mr-qhk-{label}")), label, active)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.recording_hotkey = None;
+                            this.config.active_settings_mut().action_map.set(
+                                src,
+                                ButtonAction::Key {
+                                    vk,
+                                    modifiers: mods,
+                                    hold: false,
+                                },
+                            );
+                            this.commit_config(cx);
+                        })),
+                );
+            }
+
+            let mut media_row = div().flex().flex_wrap().gap_1();
+            for mk in MediaKey::ALL {
+                let active = cur_act == ButtonAction::Media(mk);
+                media_row = media_row.child(
+                    pill_button(
+                        SharedString::from(format!("mr-mk-{}", mk.label())),
+                        mk.label(),
+                        active,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.recording_hotkey = None;
+                        this.config
+                            .active_settings_mut()
+                            .action_map
+                            .set(src, ButtonAction::Media(mk));
+                        this.commit_config(cx);
+                    })),
+                );
+            }
+
+            let macro_summary = match cur_act {
+                ButtonAction::Macro { steps, len } if len > 0 => {
+                    let parts: Vec<String> = steps
+                        .iter()
+                        .take((len as usize).min(MAX_MACRO_STEPS))
+                        .map(|st| {
+                            format!(
+                                "{} ({}ms)",
+                                format_key_combo(st.vk, st.modifiers),
+                                st.delay_ms
+                            )
+                        })
+                        .collect();
+                    parts.join(" → ")
+                }
+                _ => "No macro steps — click + Record step to chain keys".to_owned(),
+            };
+
+            let mut delay_pills = div().flex().items_center().gap_1();
+            for ms in [25u16, 50, 100, 250] {
+                delay_pills = delay_pills.child(
+                    pill_button(
+                        SharedString::from(format!("mr-mdel-{ms}")),
+                        format!("{ms}ms"),
+                        self.macro_step_delay_ms == ms,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.macro_step_delay_ms = ms;
+                        cx.notify();
+                    })),
+                );
+            }
+
+            let mut macro_controls = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    pill_button(
+                        "mr-macro-add",
+                        if recording_macro {
+                            "Press step key… (Esc cancels)"
+                        } else {
+                            "+ Record step"
+                        },
+                        recording_macro,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.recording_hotkey = if this.recording_hotkey
+                            == Some(HotkeyRecordTarget::MacroStep(src))
+                        {
+                            None
+                        } else {
+                            Some(HotkeyRecordTarget::MacroStep(src))
+                        };
+                        cx.notify();
+                    })),
+                )
+                .child(delay_pills);
+
+            if let ButtonAction::Macro { steps, len } = cur_act {
+                if len > 0 {
+                    macro_controls = macro_controls.child(
+                        subtle_button("mr-macro-pop", "Undo step").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let new_len = len.saturating_sub(1);
+                                let next = if new_len == 0 {
+                                    ButtonAction::None
+                                } else {
+                                    ButtonAction::Macro {
+                                        steps,
+                                        len: new_len,
+                                    }
+                                };
+                                this.config.active_settings_mut().action_map.set(src, next);
+                                this.commit_config(cx);
+                            },
+                        )),
+                    );
+                }
+            }
+
             remap_card = remap_card.child(
                 div()
                     .p_3()
@@ -5315,7 +5624,72 @@ impl DsMasterView {
                             )
                             .child(tray_actions),
                     )
-                    .child(dst_pills),
+                    .child(dst_pills)
+                    .child(
+                        div()
+                            .pt_2()
+                            .mt_1()
+                            .border_t_1()
+                            .border_color(color(BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(color(TEXT))
+                                            .child(format!(
+                                                "Keyboard / Media / Macro: {}",
+                                                cur_act.format_label()
+                                            )),
+                                    ),
+                            )
+                            .child(hotkey_actions)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(TEXT_MUTED))
+                                    .child("Quick hotkeys (Discord mute/deafen, F13–F16, capture)"),
+                            )
+                            .child(quick_hk_row)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(TEXT_MUTED))
+                                    .child("Media keys"),
+                            )
+                            .child(media_row)
+                            .child(
+                                div()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(color(BORDER))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(color(TEXT_MUTED))
+                                            .child("Macro sequence"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(FONT_MONO)
+                                            .text_color(color(TEXT_SECONDARY))
+                                            .child(macro_summary),
+                                    )
+                                    .child(macro_controls),
+                            ),
+                    ),
             );
         }
 
@@ -5475,7 +5849,139 @@ impl DsMasterView {
                     )),
             );
 
-        let motion_card = section_card("Touchpad & gyro mouse")
+        let fs_on = profile.flick_stick_enabled;
+        let mut fs_turn_pills = div().flex().flex_wrap().items_center().gap_1();
+        if !fs_on {
+            fs_turn_pills = fs_turn_pills.opacity(0.45);
+        }
+        for ppt in [1000.0f32, 1500.0, 2000.0, 3000.0, 4000.0] {
+            let active = fs_on && (profile.flick_stick_pixels_per_turn - ppt).abs() < 25.0;
+            fs_turn_pills = fs_turn_pills.child(
+                pill_button(
+                    SharedString::from(format!("mr-fs-ppt-{}", ppt as u32)),
+                    format!("{}", ppt as u32),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.flick_stick_enabled = true;
+                    s.flick_stick_pixels_per_turn = ppt;
+                    this.commit_config(cx);
+                })),
+            );
+        }
+        fs_turn_pills = fs_turn_pills
+            .child(subtle_button("mr-fs-dec", "-100").on_click(cx.listener(|this, _, _, cx| {
+                let s = this.config.active_settings_mut();
+                s.flick_stick_pixels_per_turn = (s.flick_stick_pixels_per_turn - 100.0).max(200.0);
+                this.commit_config(cx);
+            })))
+            .child(subtle_button("mr-fs-inc", "+100").on_click(cx.listener(|this, _, _, cx| {
+                let s = this.config.active_settings_mut();
+                s.flick_stick_pixels_per_turn =
+                    (s.flick_stick_pixels_per_turn + 100.0).min(12000.0);
+                this.commit_config(cx);
+            })));
+
+        let mut fs_speed_pills = div().flex().flex_wrap().gap_1();
+        if !fs_on {
+            fs_speed_pills = fs_speed_pills.opacity(0.45);
+        }
+        for (label, ms) in [("Fast (60ms)", 60u16), ("Normal (100ms)", 100), ("Smooth (150ms)", 150)] {
+            let active = fs_on && profile.flick_stick_flick_ms == ms;
+            fs_speed_pills = fs_speed_pills.child(
+                pill_button(SharedString::from(format!("mr-fs-ms-{ms}")), label, active).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.flick_stick_enabled = true;
+                        s.flick_stick_flick_ms = ms;
+                        this.commit_config(cx);
+                    }),
+                ),
+            );
+        }
+
+        let mut fs_thresh_pills = div().flex().flex_wrap().gap_1();
+        if !fs_on {
+            fs_thresh_pills = fs_thresh_pills.opacity(0.45);
+        }
+        for (label, th) in [("65%", 0.65f32), ("80%", 0.80), ("90%", 0.90)] {
+            let active = fs_on && (profile.flick_stick_threshold - th).abs() < 0.02;
+            fs_thresh_pills = fs_thresh_pills.child(
+                pill_button(SharedString::from(format!("mr-fs-th-{label}")), label, active)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.flick_stick_enabled = true;
+                        s.flick_stick_threshold = th;
+                        this.commit_config(cx);
+                    })),
+            );
+        }
+
+        let flick_stick_box = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(color(BORDER))
+            .child(setting_row(
+                "Flick Stick (right stick)",
+                "Snap-turn camera to stick angle & sweep smoothly via mouse (centers virtual R-stick)",
+                toggle_switch("mr-fs-sw", fs_on).on_click(cx.listener(|this, _, _, cx| {
+                    let s = this.config.active_settings_mut();
+                    s.flick_stick_enabled = !s.flick_stick_enabled;
+                    this.commit_config(cx);
+                })),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(FONT_MONO)
+                            .text_color(color(if fs_on { TEXT_SECONDARY } else { TEXT_MUTED }))
+                            .child(format!(
+                                "360° counts: {} px",
+                                profile.flick_stick_pixels_per_turn.round() as u32
+                            )),
+                    )
+                    .child(fs_turn_pills),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(if fs_on { TEXT_SECONDARY } else { TEXT_MUTED }))
+                            .child("Flick speed"),
+                    )
+                    .child(fs_speed_pills),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(if fs_on { TEXT_SECONDARY } else { TEXT_MUTED }))
+                            .child("Engage threshold"),
+                    )
+                    .child(fs_thresh_pills),
+            );
+
+        let motion_card = section_card("Touchpad, gyro & Flick Stick")
             .flex_1()
             .child(setting_row(
                 "Touchpad mouse",
@@ -5631,7 +6137,8 @@ impl DsMasterView {
                             ),
                     )
                     .child(imu_readout),
-            );
+            )
+            .child(flick_stick_box);
 
         div()
             .flex()

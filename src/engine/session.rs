@@ -13,6 +13,7 @@ use windows::core::w;
 
 use super::bt_audio::{BtAudioTestSignal, BtAudioWorkerHandle};
 use super::dsx_udp::DsxOverrideState;
+use super::keyboard::KeyboardInjector;
 use super::mouse::MouseInjector;
 use super::processing::{ProcessedInput, TurboState, apply_turbo_state, process_input};
 use super::profile::{ControllerProfile, LightbarMode, MicMuteLedOverride};
@@ -218,6 +219,7 @@ fn session_loop(
     );
 
     let mut mouse = MouseInjector::default();
+    let mut keyboard = KeyboardInjector::default();
     let mut turbo_state = TurboState::default();
     let mut last_base_proc: Option<ProcessedInput> = None;
     let mut bt_seq: u8 = 0;
@@ -330,7 +332,11 @@ fn session_loop(
     );
 
     while !stop_flag.load(Ordering::Acquire) {
-        let read_timeout = if turbo_state.is_active() { 10 } else { 250 };
+        let read_timeout = if turbo_state.is_active() || keyboard.has_pending_macro() {
+            10
+        } else {
+            250
+        };
         let outcome = match device.read_report(read_timeout) {
             Ok(o) => o,
             Err(e) => {
@@ -371,6 +377,7 @@ fn session_loop(
                 last_base_proc = Some(proc_in);
                 apply_turbo_state(&mut proc_in, &prof.turbo, &mut turbo_state, now);
                 mouse.update(&proc_in, &prof);
+                keyboard.update(&raw, &prof, now);
 
                 let cur_axes = [
                     raw.left_x,
@@ -948,6 +955,7 @@ fn session_loop(
             }
             ReadOutcome::Timeout => {
                 let now = Instant::now();
+                keyboard.tick(now);
                 maybe_idle_disconnect_bt(
                     info.transport,
                     mac_address,
@@ -1153,6 +1161,7 @@ fn session_loop(
         });
     }
 
+    keyboard.release_all();
     drop(virtual_audio);
     if let Some(mut w) = bt_audio_worker.take() {
         w.stop();

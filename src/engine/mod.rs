@@ -2,6 +2,7 @@ pub mod app_watcher;
 pub mod bt_audio;
 pub mod dsu;
 pub mod dsx_udp;
+pub mod keyboard;
 pub mod mouse;
 pub mod processing;
 pub mod profile;
