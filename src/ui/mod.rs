@@ -7035,14 +7035,16 @@ impl DsMasterView {
                     format!("Refreshing {} status...", kind.display_name())
                 }
             };
-            status_info_pill(msg)
+            Some(status_info_pill(msg))
         } else if all_drivers_ok {
-            status_inset_pill("All required drivers are installed", true)
+            None
         } else {
-            status_info_pill("Click Install on any missing driver to run its official installer")
+            Some(status_info_pill(
+                "Click Install on any missing driver to run its official installer",
+            ))
         };
 
-        let drivers_card = section_card_with_action(
+        let mut drivers_card = section_card_with_action(
             "System drivers",
             subtle_button("set-recheck-drv", "Recheck").on_click(cx.listener(|this, _, _, cx| {
                 this.recheck_drivers();
@@ -7093,15 +7095,17 @@ impl DsMasterView {
                         }))
                         .child(hardware_summary),
                 )),
-        )
-        .child(
-            div()
-                .mt_auto()
-                .pt_3()
-                .border_t_1()
-                .border_color(color(BORDER))
-                .child(drivers_footer),
         );
+        if let Some(footer) = drivers_footer {
+            drivers_card = drivers_card.child(
+                div()
+                    .mt_auto()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(color(BORDER))
+                    .child(footer),
+            );
+        }
 
         let cfg_path_str = config_path()
             .map(|p| p.display().to_string())
