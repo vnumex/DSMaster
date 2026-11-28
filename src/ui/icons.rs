@@ -371,3 +371,15 @@ pub fn speaker_icon(size: f32, col: u32) -> Div {
         b.cubic_bezier_to(xf.pt(19.0, 17.5), xf.pt(21.8, 9.0), xf.pt(21.8, 15.0));
     })
 }
+
+pub fn bolt_icon(size: f32, col: u32) -> Div {
+    stroke_icon(size, col, ICON_STROKE, |b, xf| {
+        b.move_to(xf.pt(13.5, 2.5));
+        b.line_to(xf.pt(5.5, 13.5));
+        b.line_to(xf.pt(11.5, 13.5));
+        b.line_to(xf.pt(10.5, 21.5));
+        b.line_to(xf.pt(18.5, 10.5));
+        b.line_to(xf.pt(12.5, 10.5));
+        b.close();
+    })
+}

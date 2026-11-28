@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, SetForegroundWin
 
 use self::controller_view::{ControllerPreviewState, HighlightZone, virtual_dualsense};
 use self::icons::{
-    check_icon, gamepad_icon, gyro_icon, info_icon, layers_icon, link_icon, plus_icon,
+    bolt_icon, check_icon, gamepad_icon, gyro_icon, info_icon, layers_icon, link_icon, plus_icon,
     settings_icon, sidebar_toggle_icon, sliders_icon, speaker_icon, stick_icon, sun_icon,
     swap_icon, trash_icon, trigger_icon, win_close_icon, win_max_icon, win_min_icon,
 };
@@ -1778,32 +1778,35 @@ impl DsMasterView {
             },
             None => "Offline",
         };
+        let is_charging = snap.is_some_and(|s| s.battery_status == BatteryStatus::Charging);
         let device_sub = match snap {
             Some(s) => {
-                let chg = match s.battery_status {
-                    BatteryStatus::Charging => "+",
-                    _ => "",
-                };
                 let emu_lbl = match s.emulation {
                     EmulationMode::None => "Passthrough",
                     EmulationMode::Xbox360 => "Xbox 360",
                     EmulationMode::DualShock4 => "DualShock 4",
                     EmulationMode::DualSense => "DualSense",
                 };
-                format!("{}%{chg} battery · {emu_lbl}", s.battery_percent)
+                format!("{}% battery · {emu_lbl}", s.battery_percent)
             }
             None => "Connect over USB or Bluetooth".to_owned(),
         };
 
         let mut device_sub_el = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
             .text_xs()
             .text_color(color(if connected {
                 TEXT_SECONDARY
             } else {
                 TEXT_MUTED
             }))
-            .whitespace_nowrap()
-            .child(device_sub);
+            .whitespace_nowrap();
+        if is_charging {
+            device_sub_el = device_sub_el.child(bolt_icon(12.0, SUCCESS));
+        }
+        device_sub_el = device_sub_el.child(device_sub);
         if connected {
             device_sub_el = device_sub_el.font_family(FONT_MONO);
         }
