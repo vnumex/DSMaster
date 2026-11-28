@@ -4786,30 +4786,6 @@ impl DsMasterView {
                     ),
             );
 
-        let low_batt_overriding = snap.active
-            && profile.low_battery_alert
-            && snap.battery_status == BatteryStatus::Discharging
-            && snap.battery_percent <= profile.low_battery_threshold;
-        let ds4_note = if low_batt_overriding {
-            format!(
-                "Low-battery flash active ({}% battery) — pulsing red",
-                snap.battery_percent
-            )
-        } else if !profile.override_lightbar {
-            if let Some([r, g, b]) = snap.active_lightbar_rgb {
-                format!("Game lightbar active: #{r:02X}{g:02X}{b:02X}")
-            } else {
-                "LEDs follow native or game control".to_owned()
-            }
-        } else if !profile.lightbar_mode.uses_custom_color() {
-            format!(
-                "{} effect active — adjust any color control to switch to Static",
-                profile.lightbar_mode.label()
-            )
-        } else {
-            "Custom lightbar color active on connected DualSense".to_owned()
-        };
-
         let mut mode_pills = div().flex().flex_wrap().items_center().gap_2();
         for mode in LightbarMode::ALL {
             let active = profile.override_lightbar && profile.lightbar_mode == mode;
@@ -4914,12 +4890,6 @@ impl DsMasterView {
                     .child(speed_pills),
             );
         }
-
-        let rgb_card = rgb_card.child(if profile.override_lightbar {
-            status_inset_pill(ds4_note, true)
-        } else {
-            status_info_pill(ds4_note)
-        });
 
         let mut led_cards = div().flex().flex_col().gap_2();
         for (label, mask) in PLAYER_LED_OPTIONS {
