@@ -186,6 +186,7 @@ fn apply_button_map(
     in_l2: u8,
     in_r2: u8,
     map: &ButtonMap,
+    suppress_mic_remap: bool,
 ) -> (DualSenseButtons, DPad, u8, u8) {
     let (raw_up, raw_down, raw_left, raw_right) = dpad_to_cardinals(raw_dpad);
     let mut out_buttons = raw_buttons
@@ -224,7 +225,10 @@ fn apply_button_map(
         (RemappableButton::Options, raw_buttons.contains(DualSenseButtons::OPTIONS)),
         (RemappableButton::Create, raw_buttons.contains(DualSenseButtons::CREATE)),
         (RemappableButton::Touchpad, raw_buttons.contains(DualSenseButtons::TOUCHPAD)),
-        (RemappableButton::MicMute, raw_buttons.contains(DualSenseButtons::MIC_MUTE)),
+        (
+            RemappableButton::MicMute,
+            !suppress_mic_remap && raw_buttons.contains(DualSenseButtons::MIC_MUTE),
+        ),
         (RemappableButton::DpadUp, raw_up),
         (RemappableButton::DpadDown, raw_down),
         (RemappableButton::DpadLeft, raw_left),
@@ -468,8 +472,14 @@ pub fn process_input(
     };
     let l2_in = process_trigger(raw.l2_analog, &profile.left_trigger_tuning());
     let r2_in = process_trigger(raw.r2_analog, &profile.right_trigger_tuning());
-    let (buttons, dpad, l2_analog, r2_analog) =
-        apply_button_map(raw.buttons, raw.dpad, l2_in, r2_in, &profile.button_map);
+    let (buttons, dpad, l2_analog, r2_analog) = apply_button_map(
+        raw.buttons,
+        raw.dpad,
+        l2_in,
+        r2_in,
+        &profile.button_map,
+        profile.mic_button_controls_windows_mic,
+    );
 
     let calibrated_gyro = [
         cal.gyro[0].apply(raw.gyro[0]),

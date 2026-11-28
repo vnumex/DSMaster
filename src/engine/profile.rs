@@ -1041,6 +1041,8 @@ pub struct ControllerProfile {
     pub button_map: ButtonMap,
     #[serde(default)]
     pub action_map: ActionMap,
+    #[serde(default)]
+    pub mic_button_controls_windows_mic: bool,
     pub touchpad_mouse: bool,
     pub touchpad_sensitivity: f32,
     #[serde(default = "default_true")]
@@ -1117,6 +1119,7 @@ impl Default for ControllerProfile {
             right_trigger_tuning: TriggerTuning::default(),
             button_map: ButtonMap::default(),
             action_map: ActionMap::default(),
+            mic_button_controls_windows_mic: false,
             touchpad_mouse: false,
             touchpad_sensitivity: 1.0,
             touchpad_scroll: true,

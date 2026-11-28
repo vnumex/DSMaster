@@ -10,6 +10,7 @@ pub mod profiles_store;
 pub mod seqlock;
 pub mod session;
 pub mod telemetry;
+pub mod win_mic;
 
 pub use dsu::{DsuServer, DsuStatus};
 pub use dsx_udp::{DsxOverrideState, DsxUdpServer, DsxUdpStatus};

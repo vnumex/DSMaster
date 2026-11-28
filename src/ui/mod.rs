@@ -5170,12 +5170,16 @@ impl DsMasterView {
 
         let mut source_grid = div().flex().flex_wrap().gap_2();
         for src in RemappableButton::SOURCES {
+            let win_mic_locked =
+                src == RemappableButton::MicMute && profile.mic_button_controls_windows_mic;
             let dst = profile.button_map.get(src);
             let act = profile.action_map.get(src);
             let has_act = !act.is_none();
-            let is_custom = dst != src || has_act;
+            let is_custom = win_mic_locked || dst != src || has_act;
             let is_sel = self.selected_remap_src == Some(src);
-            let badge_text = if has_act {
+            let badge_text = if win_mic_locked {
+                "Win Mic".to_owned()
+            } else if has_act {
                 act.format_label()
             } else if dst != src {
                 format!("→ {}", dst.label())
@@ -5232,7 +5236,9 @@ impl DsMasterView {
                         div()
                             .text_xs()
                             .font_family(FONT_MONO)
-                            .text_color(color(if !has_act && dst == RemappableButton::None {
+                            .text_color(color(if win_mic_locked {
+                                SUCCESS
+                            } else if !has_act && dst == RemappableButton::None {
                                 DANGER
                             } else if is_custom {
                                 ACCENT
@@ -5312,6 +5318,36 @@ impl DsMasterView {
         .flex_1()
         .child(
             div()
+                .pb_2()
+                .border_b_1()
+                .border_color(color(BORDER))
+                .child(setting_row(
+                    "Mic button controls Windows mic",
+                    "Toggle default Windows microphone mute & sync the orange Mic LED (disables custom Mic Mute remap)",
+                    toggle_switch(
+                        "mr-win-mic-sw",
+                        profile.mic_button_controls_windows_mic,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let s = this.config.active_settings_mut();
+                        s.mic_button_controls_windows_mic = !s.mic_button_controls_windows_mic;
+                        if s.mic_button_controls_windows_mic
+                            && matches!(
+                                this.recording_hotkey,
+                                Some(
+                                    HotkeyRecordTarget::SingleKey(RemappableButton::MicMute)
+                                        | HotkeyRecordTarget::MacroStep(RemappableButton::MicMute)
+                                )
+                            )
+                        {
+                            this.recording_hotkey = None;
+                        }
+                        this.commit_config(cx);
+                    })),
+                )),
+        )
+        .child(
+            div()
                 .text_size(px(13.0))
                 .text_color(color(TEXT_MUTED))
                 .child("Click any button (e.g. Mic Mute) to remap or bind a keyboard hotkey, media key, or macro"),
@@ -5319,6 +5355,11 @@ impl DsMasterView {
         .child(source_grid);
 
         if let Some(src) = self.selected_remap_src {
+            if src == RemappableButton::MicMute && profile.mic_button_controls_windows_mic {
+                remap_card = remap_card.child(status_info_pill(
+                    "Mic Mute is currently controlling your Windows microphone — turn off \"Mic button controls Windows mic\" above to customize its remap or hotkey",
+                ));
+            } else {
             let cur_dst = profile.button_map.get(src);
             let mut dst_pills = div().flex().flex_wrap().gap_1().child(
                 pill_button("mr-dst-off", "Off", cur_dst == RemappableButton::None).on_click(
@@ -5671,6 +5712,7 @@ impl DsMasterView {
                             ),
                     ),
             );
+            }
         }
 
         let mut turbo_box = div()

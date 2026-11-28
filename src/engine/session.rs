@@ -19,6 +19,7 @@ use super::processing::{ProcessedInput, TurboState, apply_turbo_state, process_i
 use super::profile::{ControllerProfile, LightbarMode, MicMuteLedOverride};
 use super::seqlock::SeqLock;
 use super::telemetry::TelemetrySnapshot;
+use super::win_mic::WindowsMicControl;
 use crate::emu::audio_device::{SharedAudioBridge, VirtualAudioDevice, VirtualAudioMode};
 use crate::emu::dualsense::VirtualDualSenseConfig;
 use crate::emu::vigem::ds4::DualShock4Target;
@@ -220,6 +221,12 @@ fn session_loop(
 
     let mut mouse = MouseInjector::default();
     let mut keyboard = KeyboardInjector::default();
+    let win_mic = WindowsMicControl::new();
+    let mut prev_mic_btn = false;
+    let mut last_win_mic_poll = Instant::now() - Duration::from_secs(1);
+    let mut win_mic_muted: Option<bool> = None;
+    let mut last_win_mic_mode = initial_prof.mic_button_controls_windows_mic;
+    let mut clear_win_mic_led = false;
     let mut turbo_state = TurboState::default();
     let mut last_base_proc: Option<ProcessedInput> = None;
     let mut bt_seq: u8 = 0;
@@ -675,6 +682,34 @@ fn session_loop(
                     }
                 }
 
+                let mic_btn_now = raw.buttons.contains(DualSenseButtons::MIC_MUTE);
+                if prof.mic_button_controls_windows_mic {
+                    if mic_btn_now && !prev_mic_btn {
+                        if let Some(muted) = win_mic.toggle_mute() {
+                            win_mic_muted = Some(muted);
+                            last_win_mic_poll = now;
+                            dirty_mic_mute_led = true;
+                        }
+                    } else if !last_win_mic_mode
+                        || now.saturating_duration_since(last_win_mic_poll)
+                            >= Duration::from_millis(250)
+                    {
+                        last_win_mic_poll = now;
+                        let cur = win_mic.is_muted();
+                        if cur != win_mic_muted || !last_win_mic_mode {
+                            win_mic_muted = cur;
+                            dirty_mic_mute_led = true;
+                        }
+                    }
+                    clear_win_mic_led = false;
+                } else if last_win_mic_mode {
+                    win_mic_muted = None;
+                    clear_win_mic_led = true;
+                    dirty_mic_mute_led = true;
+                }
+                last_win_mic_mode = prof.mic_button_controls_windows_mic;
+                prev_mic_btn = mic_btn_now;
+
                 if prof.mic_mute_led != last_mic_mute_led {
                     last_mic_mute_led = prof.mic_mute_led;
                     dirty_mic_mute_led = true;
@@ -834,9 +869,25 @@ fn session_loop(
                         } else {
                             last_led_brightness
                         };
+                        let win_mic_led = if prof.mic_button_controls_windows_mic {
+                            win_mic_muted.map(|m| {
+                                if m {
+                                    MicMuteLed::Solid
+                                } else {
+                                    MicMuteLed::Off
+                                }
+                            })
+                        } else if clear_win_mic_led {
+                            Some(MicMuteLed::Off)
+                        } else {
+                            None
+                        };
                         let update_mute = dirty_mic_mute_led
-                            && (dsx_mic.is_some() || prof.mic_mute_led.to_protocol().is_some());
+                            && (dsx_mic.is_some()
+                                || win_mic_led.is_some()
+                                || prof.mic_mute_led.to_protocol().is_some());
                         let mute_val = dsx_mic
+                            .or(win_mic_led)
                             .or_else(|| prof.mic_mute_led.to_protocol())
                             .unwrap_or(MicMuteLed::Off);
                         let update_left_trig = release_triggers || dirty_left_trigger;
@@ -926,6 +977,7 @@ fn session_loop(
                         release_player_leds = false;
                         dirty_led_brightness = false;
                         dirty_mic_mute_led = false;
+                        clear_win_mic_led = false;
                         dirty_left_trigger = false;
                         dirty_right_trigger = false;
                         release_triggers = false;

@@ -47,7 +47,13 @@ impl KeyboardInjector {
             let was_pressed = self.prev_pressed[idx];
             self.prev_pressed[idx] = pressed;
 
-            let action = profile.action_map.get(src);
+            let action = if src == RemappableButton::MicMute
+                && profile.mic_button_controls_windows_mic
+            {
+                ButtonAction::None
+            } else {
+                profile.action_map.get(src)
+            };
 
             // If a previously held key is no longer bound to the same hold action, release it.
             if let Some((held_vk, held_mods)) = self.held_keys[idx] {
