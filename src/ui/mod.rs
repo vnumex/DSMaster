@@ -1707,7 +1707,7 @@ impl DsMasterView {
         let on_set = self.page == ActivePage::Settings;
 
         div()
-            .w(px(72.0))
+            .w(px(78.0))
             .flex_shrink_0()
             .h_full()
             .bg(color(RAIL_BG))
@@ -1728,7 +1728,7 @@ impl DsMasterView {
                         icon_rail_item(
                             "rail-controller",
                             gamepad_icon(20.0, if on_ctrl { TEXT } else { TEXT_MUTED }),
-                            "Pad",
+                            "Controller",
                             on_ctrl,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {

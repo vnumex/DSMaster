@@ -330,7 +330,7 @@ pub fn icon_rail_item(
     let text = if active { TEXT } else { TEXT_MUTED };
     div()
         .id(id.into())
-        .w(px(56.0))
+        .w(px(64.0))
         .py_2()
         .rounded(px(8.0))
         .bg(color(bg))
